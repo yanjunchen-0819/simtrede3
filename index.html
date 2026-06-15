@@ -3985,6 +3985,11 @@ function isMarketOpenPatch(d = getTWNTime()) {
   return mins >= 9 * 60 && mins < 13 * 60 + 30;
 }
 
+function isAfterMarketClosePatch(d = getTWNTime()) {
+  if (!isTradingDayPatch(d)) return false;
+  return getMarketMinutesPatch(d) >= 13 * 60 + 30;
+}
+
 function getNextMarketOpenDatePatch(baseDate = getTWNTime()) {
   const d = new Date(baseDate);
   const mins = d.getHours() * 60 + d.getMinutes();
@@ -4000,6 +4005,10 @@ function getPendingOrderDatePatch(blockReason = '') {
 
 function isIntradayPendingReasonPatch(comment = '') {
   return /疑似漲停|疑似跌停|盤中報價|報價/.test(String(comment || ''));
+}
+
+function isDayOrderPatch(order) {
+  return isIntradayPendingReasonPatch(order?.comment) || /當日委託|盤中/.test(String(order?.order_type || ''));
 }
 
 function getMarketMinutesPatch(d = getTWNTime()) {
@@ -4521,6 +4530,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
     } else {
       if (dot) dot.className = 'err';
       setText('price-txt', 'Yahoo 報價未更新');
+      await expireDayOrdersAfterClosePatch();
     }
   } catch (e) {
     console.error('triggerPriceUpdate failed:', e);
@@ -4777,7 +4787,46 @@ async function cancelPendingOrderPatch(id) {
   toast('已取消委託', 'info');
 }
 
+async function expireDayOrdersAfterClosePatch() {
+  const now = getTWNTime();
+  if (!isAfterMarketClosePatch(now)) return 0;
+  rebuildPendingOrderStatePatch();
+  const today = now.toISOString().slice(0, 10);
+  const targets = [...state.pendingApproval, ...state.approvedPending]
+    .filter(o => (o.settlement_date || today) <= today)
+    .filter(o => isDayOrderPatch(o) || (o.settlement_date || '') === today);
+  if (!targets.length) return 0;
+
+  let expiredCount = 0;
+  for (const order of targets) {
+    const patch = {
+      status: 'expired',
+      comment: '當日委託收盤後自動失效'
+    };
+    const { error } = await db.from('orders').update(patch).eq('id', order.id);
+    if (error) {
+      console.warn('expire day order failed', order.id, error);
+      continue;
+    }
+    Object.assign(order, patch);
+    expiredCount += 1;
+  }
+
+  if (expiredCount > 0) {
+    rebuildPendingOrderStatePatch();
+    renderPendingList();
+    renderHistory();
+    renderTradeReport();
+    toast(`已自動失效 ${expiredCount} 筆當日委託`, 'info');
+  }
+  return expiredCount;
+}
+
 async function tryExecutePendingOrdersPatch(changedSymbols = []) {
+  if (isAfterMarketClosePatch()) {
+    await expireDayOrdersAfterClosePatch();
+    return;
+  }
   if (!isMarketOpenPatch()) return;
   rebuildPendingOrderStatePatch();
   const changed = new Set((changedSymbols || []).map(String));
