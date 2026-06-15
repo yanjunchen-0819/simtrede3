@@ -3992,6 +3992,16 @@ function getNextMarketOpenDatePatch(baseDate = getTWNTime()) {
   return nextTradingDay(d);
 }
 
+function getPendingOrderDatePatch(blockReason = '') {
+  const now = getTWNTime();
+  if (isMarketOpenPatch(now)) return now.toISOString().slice(0, 10);
+  return getNextMarketOpenDatePatch(now);
+}
+
+function isIntradayPendingReasonPatch(comment = '') {
+  return /疑似漲停|疑似跌停|盤中報價|報價/.test(String(comment || ''));
+}
+
 function getMarketMinutesPatch(d = getTWNTime()) {
   return d.getHours() * 60 + d.getMinutes();
 }
@@ -4047,6 +4057,28 @@ function getExecutionBlockReasonPatch(sym, side) {
   }
   if (side === 'sell' && (price <= downLimit * 1.005 || changeRate <= -9.5)) {
     return '疑似跌停，賣出不保證成交，改列委託';
+  }
+  return '';
+}
+
+function getPendingExecutionBlockReasonPatch(sym, side) {
+  const now = getTWNTime();
+  if (!isMarketOpenPatch(now)) return '非交易時段委託';
+
+  const s = state.securities?.[sym];
+  const price = getSecurityPricePatch(sym);
+  const base = isValidPricePatch(s?.base) ? +s.base : null;
+  if (price == null || base == null) return '報價或昨收價無效，暫不成交';
+
+  const upLimit = base * 1.1;
+  const downLimit = base * 0.9;
+  const changeRate = Number.isFinite(+s.changeRate) ? +s.changeRate : ((price - base) / base * 100);
+
+  if (side === 'buy' && (price >= upLimit * 0.995 || changeRate >= 9.5)) {
+    return '疑似漲停，買入不保證成交，維持委託';
+  }
+  if (side === 'sell' && (price <= downLimit * 1.005 || changeRate <= -9.5)) {
+    return '疑似跌停，賣出不保證成交，維持委託';
   }
   return '';
 }
@@ -4485,7 +4517,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
       if (dot) dot.className = 'live';
       setText('price-txt', `Yahoo 報價 · ${nowTime()}`);
       setText('quote-update-time', nowTime());
-      await tryExecutePendingOrdersPatch(Array.from(new Set(changedSymbols)));
+      await tryExecutePendingOrdersPatch();
     } else {
       if (dot) dot.className = 'err';
       setText('price-txt', 'Yahoo 報價未更新');
@@ -4569,7 +4601,7 @@ async function executeMarketOrder() {
   const taxAmount = Math.round(amount * taxRate);
   const settlementAmount = dir === 'buy' ? amount + feeAmount + taxAmount : amount - feeAmount - taxAmount;
   const status = marketOpen ? 'executed' : 'pending';
-  const tradeDate = marketOpen ? getSettlementDate() : getNextMarketOpenDatePatch();
+  const tradeDate = marketOpen ? getSettlementDate() : getPendingOrderDatePatch(blockReason);
 
   const order = {
     id: uid(),
@@ -4760,9 +4792,9 @@ async function tryExecutePendingOrdersPatch(changedSymbols = []) {
     const side = order.side;
     const qty = Number(order.qty || 0);
     if (!sym || !state.securities[sym] || !qty) continue;
-    if (order.settlement_date && order.settlement_date > today) continue;
+    if (order.settlement_date && order.settlement_date > today && !isIntradayPendingReasonPatch(order.comment)) continue;
 
-    const blockReason = getExecutionBlockReasonPatch(sym, side);
+    const blockReason = getPendingExecutionBlockReasonPatch(sym, side);
     if (blockReason) {
       order.comment = blockReason;
       continue;
