@@ -3042,11 +3042,7 @@ function renderPerformanceReport() {
 }
 
 function renderDividendForecastReport() {
-  const el = qs('report-dividends');
-  if (!el) return;
-  const rows = [...(state.dividendForecasts || [])].sort((a, b) => `${a.ex_date || a.exDate || ''}`.localeCompare(`${b.ex_date || b.exDate || ''}`));
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty-state">目前無未來除權息資料</div>';
+  
     return;
   }
   el.innerHTML = rows.map(d => {
