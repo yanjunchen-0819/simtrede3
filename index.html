@@ -3708,14 +3708,7 @@ async function loadPortfolioEventsFromDB() {
 }
 
 async function loadDividendForecasts() {
-  const today = new Date().toISOString().slice(0, 10);
-  const { data, error } = await db.from('corporate_actions')
-    .select('*')
-    .gte('ex_date', today)
-    .eq('status', 'active')
-    .order('ex_date', { ascending: true });
-  if (error || !data) return;
-  state.dividendForecasts = data;
+ state.dividendForecasts = [];
 }
 
 async function runAutoCorporateActions() {
