@@ -6305,10 +6305,65 @@ function getHeldSymbolsForGroupPatch(grp) {
     .filter(Boolean)));
 }
 
+function ensureHiddenTickerStatePatch() {
+  if (!state.hiddenTickers || typeof state.hiddenTickers !== 'object') {
+    state.hiddenTickers = { etf: [], stock: [] };
+  }
+  if (!Array.isArray(state.hiddenTickers.etf)) state.hiddenTickers.etf = [];
+  if (!Array.isArray(state.hiddenTickers.stock)) state.hiddenTickers.stock = [];
+}
+
+function isTickerHiddenPatch(grp, symbol) {
+  ensureHiddenTickerStatePatch();
+  return !!state.hiddenTickers?.[grp]?.includes(symbol);
+}
+
+function hideTickerPatch(grp, symbol) {
+  ensureHiddenTickerStatePatch();
+  if (!state.hiddenTickers[grp].includes(symbol)) state.hiddenTickers[grp].push(symbol);
+  state.customTickers[grp] = (state.customTickers?.[grp] || []).filter(sym => sym !== symbol);
+}
+
+function unhideTickerPatch(grp, symbol) {
+  ensureHiddenTickerStatePatch();
+  state.hiddenTickers[grp] = (state.hiddenTickers?.[grp] || []).filter(sym => sym !== symbol);
+}
+
+const originalLoadTickerPrefsHidePatch = loadTickerPrefs;
+loadTickerPrefs = function loadTickerPrefsWithHiddenPatch() {
+  originalLoadTickerPrefsHidePatch();
+  ensureHiddenTickerStatePatch();
+  try {
+    const raw = localStorage.getItem(TICKER_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed?.hiddenTickers?.etf) state.hiddenTickers.etf = parsed.hiddenTickers.etf;
+    if (parsed?.hiddenTickers?.stock) state.hiddenTickers.stock = parsed.hiddenTickers.stock;
+  } catch (e) {
+    console.warn('loadTickerPrefs hidden failed:', e);
+  }
+};
+
+const originalSaveTickerPrefsHidePatch = saveTickerPrefs;
+saveTickerPrefs = function saveTickerPrefsWithHiddenPatch() {
+  ensureHiddenTickerStatePatch();
+  try {
+    localStorage.setItem(TICKER_STORAGE_KEY, JSON.stringify({
+      customTickers: state.customTickers,
+      hiddenTickers: state.hiddenTickers
+    }));
+  } catch (e) {
+    console.warn('saveTickerPrefs hidden failed:', e);
+  }
+  try { scheduleSaveSharedSettingsPatch(); } catch {}
+};
+
 const previousGetTickerSymbolsHidePatch = getTickerSymbols;
 getTickerSymbols = function getTickerSymbolsTrackedOnlyPatched(grp = state.group) {
+  ensureHiddenTickerStatePatch();
   const custom = Array.from(new Set((state.customTickers?.[grp] || [])
-    .filter(sym => state.securities?.[sym] && state.securities[sym].grp === grp)));
+    .filter(sym => state.securities?.[sym] && state.securities[sym].grp === grp)
+    .filter(sym => !isTickerHiddenPatch(grp, sym))));
   const held = getHeldSymbolsForGroupPatch(grp)
     .filter(sym => state.securities?.[sym] && state.securities[sym].grp === grp);
 
@@ -6317,7 +6372,65 @@ getTickerSymbols = function getTickerSymbolsTrackedOnlyPatched(grp = state.group
 
   return Object.keys(state.securities || {})
     .filter(sym => state.securities?.[sym]?.grp === grp)
+    .filter(sym => !isTickerHiddenPatch(grp, sym) || held.includes(sym))
     .sort((a, b) => normalizeCleanSymbolPatch(a).localeCompare(normalizeCleanSymbolPatch(b)));
+};
+
+const originalEnsureTickerVisibleHidePatch = ensureTickerVisible;
+ensureTickerVisible = function ensureTickerVisibleUnhidePatched(grp, symbol) {
+  unhideTickerPatch(grp, symbol);
+  originalEnsureTickerVisibleHidePatch(grp, symbol);
+};
+
+const originalConfirmAddTickerHidePatch = confirmAddTicker;
+confirmAddTicker = function confirmAddTickerUnhidePatched() {
+  const raw = (qs('add-ticker-input')?.value || '').trim().toUpperCase();
+  const grp = inferGroupByRawSymbol(raw);
+  const symbol = normalizeSymbolInput(raw);
+  const candidates = [symbol, raw, raw + '.TW', raw + '.TWO'];
+  candidates.forEach(sym => unhideTickerPatch(grp, sym));
+  return originalConfirmAddTickerHidePatch();
+};
+
+const originalConfirmAddSecurityHidePatch = confirmAddSecurity;
+confirmAddSecurity = async function confirmAddSecurityUnhidePatched() {
+  const symbol = normalizeSymbolInput(qs('new-sec-symbol')?.value || '');
+  const grp = qs('new-sec-grp')?.value || inferGroupByRawSymbol(symbol);
+  unhideTickerPatch(grp, symbol);
+  return originalConfirmAddSecurityHidePatch();
+};
+
+const previousSharedSettingsPayloadHiddenPatch = sharedSettingsPayloadPatch;
+sharedSettingsPayloadPatch = function sharedSettingsPayloadWithHiddenPatch() {
+  ensureHiddenTickerStatePatch();
+  const payload = previousSharedSettingsPayloadHiddenPatch();
+  payload.hiddenTickers = {
+    etf: Array.from(new Set(state.hiddenTickers?.etf || [])),
+    stock: Array.from(new Set(state.hiddenTickers?.stock || []))
+  };
+  return payload;
+};
+
+const previousLoadSharedSettingsHiddenPatch = loadSharedSettingsPatch;
+loadSharedSettingsPatch = async function loadSharedSettingsWithHiddenPatch() {
+  await previousLoadSharedSettingsHiddenPatch();
+  ensureHiddenTickerStatePatch();
+  try {
+    const { data, error } = await db
+      .from('app_settings')
+      .select('value')
+      .eq('key', SHARED_SETTINGS_KEY_PATCH)
+      .maybeSingle();
+    if (error) return;
+    const hidden = data?.value?.hiddenTickers || {};
+    state.hiddenTickers = {
+      etf: Array.from(new Set([...(state.hiddenTickers?.etf || []), ...(hidden.etf || [])])),
+      stock: Array.from(new Set([...(state.hiddenTickers?.stock || []), ...(hidden.stock || [])]))
+    };
+    saveTickerPrefs();
+  } catch (e) {
+    console.warn('loadSharedSettings hidden failed:', e);
+  }
 };
 
 confirmDeleteTicker = async function confirmDeleteTickerHideOnlyPatched() {
@@ -6339,7 +6452,7 @@ confirmDeleteTicker = async function confirmDeleteTickerHideOnlyPatched() {
     return;
   }
 
-  state.customTickers[grp] = (state.customTickers?.[grp] || []).filter(sym => sym !== symbol);
+  hideTickerPatch(grp, symbol);
   saveTickerPrefs();
   renderTickers();
   updateOrderSymbols();
