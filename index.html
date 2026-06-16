@@ -4469,13 +4469,46 @@ function extractQuoteTimePatch(item) {
     null;
 }
 
+async function fetchQuoteWithEndpointFallbackPatch(payload, supabaseKeyValue) {
+  const endpoints = [
+    `${supabaseUrl}/functions/v1/stock-yahoo-live`,
+    `${supabaseUrl}/functions/v1/stock-yahoo`
+  ];
+  let lastError = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'apikey': supabaseKeyValue, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const text = await res.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+      if (!res.ok) {
+        lastError = new Error(`${endpoint} -> HTTP ${res.status}`);
+        continue;
+      }
+      return { ok: true, endpoint, data };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  return { ok: false, endpoint: endpoints[endpoints.length - 1], data: {}, error: lastError };
+}
+
 triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false) {
   const dot = qs('price-dot');
   if (dot) dot.className = '';
   try {
     const symbols = Object.keys(state.securities || {});
     if (!symbols.length) throw new Error('沒有商品可更新');
-    const endpoint = `${supabaseUrl}/functions/v1/stock-yahoo-live`;
     const debugOn = forceDebug || isDebugPanelEnabled();
     let updatedCount = 0;
     const changedSymbols = [];
@@ -4500,19 +4533,14 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
 
     let usedBatch = false;
     try {
-      const batchRes = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'apikey': supabaseKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols, range: '1d', interval: '1m' })
-      });
-      const batchText = await batchRes.text();
-      const batchData = batchText ? JSON.parse(batchText) : {};
+      const batchResult = await fetchQuoteWithEndpointFallbackPatch({ symbols, range: '1d', interval: '1m' }, supabaseKey);
+      const batchData = batchResult.data || {};
       const rows = Array.isArray(batchData?.rows) ? batchData.rows
         : Array.isArray(batchData?.quotes) ? batchData.quotes
         : Array.isArray(batchData?.results) ? batchData.results
         : Array.isArray(batchData?.data) ? batchData.data
         : null;
-      if (batchRes.ok && Array.isArray(rows) && rows.length) {
+      if (batchResult.ok && Array.isArray(rows) && rows.length) {
         usedBatch = true;
         rows.forEach(applyQuote);
       }
@@ -4523,14 +4551,9 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
     if (!usedBatch) {
       for (const symbol of symbols) {
         try {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'apikey': supabaseKey, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbol, range: '1d', interval: '1m' })
-          });
-          const text = await res.text();
-          const data = text ? JSON.parse(text) : {};
-          if (!res.ok) continue;
+          const result = await fetchQuoteWithEndpointFallbackPatch({ symbol, range: '1d', interval: '1m' }, supabaseKey);
+          const data = result.data || {};
+          if (!result.ok) continue;
           applyQuote({ ...data, symbol });
         } catch (err) {
           if (debugOn) debugLog('single quote update failed', { symbol, error: String(err) });
