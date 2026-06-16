@@ -6298,6 +6298,58 @@ syncSettingsFormFromStatePatch = function syncSettingsFormNoCapPatched() {
   if (stkLimit) stkLimit.value = '';
 };
 
+function getHeldSymbolsForGroupPatch(grp) {
+  return Array.from(new Set((state.groups?.[grp]?.positions || [])
+    .filter(p => Number(p.qty || 0) > 0)
+    .map(p => p.symbol)
+    .filter(Boolean)));
+}
+
+const previousGetTickerSymbolsHidePatch = getTickerSymbols;
+getTickerSymbols = function getTickerSymbolsTrackedOnlyPatched(grp = state.group) {
+  const custom = Array.from(new Set((state.customTickers?.[grp] || [])
+    .filter(sym => state.securities?.[sym] && state.securities[sym].grp === grp)));
+  const held = getHeldSymbolsForGroupPatch(grp)
+    .filter(sym => state.securities?.[sym] && state.securities[sym].grp === grp);
+
+  const merged = Array.from(new Set([...custom, ...held]));
+  if (merged.length) return merged;
+
+  return Object.keys(state.securities || {})
+    .filter(sym => state.securities?.[sym]?.grp === grp)
+    .sort((a, b) => normalizeCleanSymbolPatch(a).localeCompare(normalizeCleanSymbolPatch(b)));
+};
+
+confirmDeleteTicker = async function confirmDeleteTickerHideOnlyPatched() {
+  const symbol = deleteTickerSymbol;
+  const grp = deleteTickerGrp;
+  if (!symbol) {
+    closeDeleteTickerModal();
+    return;
+  }
+  if (!canDeleteTicker(symbol, grp)) {
+    originalConfirmDeleteTickerPatch();
+    return;
+  }
+
+  const heldSymbols = new Set(getHeldSymbolsForGroupPatch(grp));
+  if (heldSymbols.has(symbol)) {
+    toast(`無法移除 ${symbol}，目前仍有持股`, 'warn');
+    closeDeleteTickerModal();
+    return;
+  }
+
+  state.customTickers[grp] = (state.customTickers?.[grp] || []).filter(sym => sym !== symbol);
+  saveTickerPrefs();
+  renderTickers();
+  updateOrderSymbols();
+  updateOrderPrice();
+  renderPositions();
+  updateAllMetrics();
+  closeDeleteTickerModal();
+  toast(`已從追蹤清單移除：${symbol}`, 'success');
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
