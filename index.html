@@ -990,8 +990,8 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
 
 <script>
 // ========== SUPABASE ==========
-const supabaseUrl = 'https://murynwlbdgxkimfgunfx.supabase.co';
-const supabaseKey = 'sb_publishable__l1D3S4Rzwp3go_Gf_R24g_d_UjaFmG';
+const supabaseUrl = 'https://bkiqjfzipaimrttlfddl.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJraXFqZnppcGFpbXJ0dGxmZGRsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkwMDM4NTcsImV4cCI6MjA5NDU3OTg1N30.ecXch84pRpMGhrunQiX97AxE7bc_XIHs16ZE0loT9rM';
 const db = supabase.createClient(supabaseUrl, supabaseKey);
 
 // ========== STATE ==========
@@ -4237,7 +4237,7 @@ function renderAdjustmentHistoryPatch() {
   }
   list.innerHTML = `
     <div style="font-size:13px;color:var(--text3);margin-bottom:8px">最近人工調整 / 除權息紀錄</div>
-    ${events.map(ev => {
+    ${events.map((ev, idx) => {
       const voided = isVoidedPortfolioEventPatch(ev);
       const type = String(ev.event_type || '').replace('voided_', '');
       const value = type === 'cash_dividend'
@@ -4254,7 +4254,7 @@ function renderAdjustmentHistoryPatch() {
               </div>
               <div class="order-meta">${ev.event_date || '—'} · ${value}</div>
             </div>
-            ${voided ? '' : `<button class="btn btn-sm btn-sell" onclick="voidPortfolioEventPatch('${ev.id || ''}')">退回</button>`}
+            ${voided ? '' : `<button class="btn btn-sm btn-sell" onclick="voidPortfolioEventPatch('${ev.id || ''}', ${idx})">退回</button>`}
           </div>
         </div>
       `;
@@ -4262,16 +4262,33 @@ function renderAdjustmentHistoryPatch() {
   `;
 }
 
-async function voidPortfolioEventPatch(id) {
-  if (!id) {
-    toast('這筆調整缺少 id，無法退回', 'danger');
-    return;
-  }
-  const ev = state.portfolioEvents.find(x => x.id === id);
+function getVisiblePortfolioEventsPatch() {
+  return [...(state.portfolioEvents || [])]
+    .sort((a, b) => `${b.event_date || ''} ${b.created_at || ''}`.localeCompare(`${a.event_date || ''} ${a.created_at || ''}`))
+    .slice(0, 20);
+}
+
+async function voidPortfolioEventPatch(id, visibleIndex = -1) {
+  const visibleEvents = getVisiblePortfolioEventsPatch();
+  const ev = id
+    ? state.portfolioEvents.find(x => String(x.id) === String(id))
+    : visibleEvents[visibleIndex];
   if (!ev || isVoidedPortfolioEventPatch(ev)) return;
   if (!confirm('確定退回這筆人工調整？退回後會保留紀錄，但不再納入 NAV 與損益計算。')) return;
   const nextType = 'voided_' + String(ev.event_type || '');
-  const { error } = await db.from('portfolio_events').update({ event_type: nextType }).eq('id', id);
+  let query = db.from('portfolio_events').update({ event_type: nextType });
+  if (id) {
+    query = query.eq('id', id);
+  } else {
+    query = query
+      .eq('event_type', ev.event_type)
+      .eq('event_date', ev.event_date)
+      .eq('symbol', ev.symbol)
+      .eq(ev.grp ? 'grp' : 'group', ev.grp || ev.group || '')
+      .eq('cash_amount', ev.cash_amount || 0)
+      .eq('share_delta', ev.share_delta || 0);
+  }
+  const { error } = await query;
   if (error) {
     toast('退回調整失敗：' + error.message, 'danger');
     return;
@@ -4281,6 +4298,7 @@ async function voidPortfolioEventPatch(id) {
   updateAllMetrics();
   renderHistory();
   renderTradeReport();
+  renderAdjustmentHistoryPatch();
   toast('已退回該筆調整', 'success');
 }
 
