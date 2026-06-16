@@ -3652,8 +3652,8 @@ function rebuildPortfolioFromTimeline() {
   const timeline = [
     ...state.orders.filter(o => o.status === 'executed').map(o => ({
       kind: 'order',
-      sortDate: o.settlement_date || '9999-12-31',
-      sortTime: o.time || '23:59:59',
+      sortDate: o.settlement_date || o.date || (o.created_at ? String(o.created_at).slice(0, 10) : null) || '9999-12-31',
+      sortTime: o.time || (o.created_at ? String(o.created_at).slice(11, 19) : null) || '23:59:59',
       data: o
     })),
     ...state.portfolioEvents.map(ev => ({
@@ -3678,6 +3678,8 @@ async function loadOrdersFromDB() {
     id: o.id, time: o.time, symbol: o.symbol, name: o.name,
     qty: +o.qty, side: o.side, price: +o.price, amount: +o.amount,
     group: o.grp, grp: o.grp, status: o.status, comment: o.comment,
+    date: o.date || (o.created_at ? String(o.created_at).slice(0, 10) : null),
+    created_at: o.created_at || null,
     settlement_date: o.settlementdate || o.settlement_date || null,
     settlement_price: o.settlementprice ? +o.settlementprice : (o.settlement_price ? +o.settlement_price : null),
     fee_rate: o.fee_rate,
