@@ -6172,6 +6172,23 @@ init = async function initSharedSettingsPatched() {
   renderNavChart();
 };
 
+const originalTriggerPriceUpdateUiPatch = triggerPriceUpdate;
+triggerPriceUpdate = async function triggerPriceUpdateUiPatched(forceDebug = false) {
+  const result = await originalTriggerPriceUpdateUiPatch(forceDebug);
+  renderTickers();
+  renderPositions();
+  updateOrderPrice();
+  return result;
+};
+
+const previousInitAutoQuotePatch = init;
+init = async function initAutoQuotePatched() {
+  await previousInitAutoQuotePatch();
+  await triggerPriceUpdate(false);
+  updateAllMetrics();
+  setInterval(() => triggerPriceUpdate(false), 30000);
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
