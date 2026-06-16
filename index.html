@@ -623,21 +623,11 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
                 <button class="btn btn-sm btn-etf" id="unfreeze-etf" style="display:none" onclick="unfreezeGroup('etf')">解凍</button>
               </div>
             </div>
+            
             <div class="card-body">
-              <div class="risk-wrap">
-                <div class="risk-label-row">
-                  <span style="color:var(--text)">回撤使用率</span>
-                  <span style="font-family:var(--mono);font-size:13px" id="etf-dd-label">0% / 10%</span>
-                </div>
-                <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="etf-dd-bar" style="width:0%"></div></div>
-              </div>
-              <div class="three-col-grid">
+              <div class="metric-row" style="margin-top: 4px;">
                 <div class="metric">
-                  <div class="metric-label">最大回撤</div>
-                  <div class="metric-val neutral" id="etf-dd-val">0.00%</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">資金使用</div>
+                  <div class="metric-label">資金使用率</div>
                   <div class="metric-val neutral" id="etf-util">0%</div>
                 </div>
                 <div class="metric">
@@ -655,21 +645,11 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
                 <button class="btn btn-sm btn-stk" id="unfreeze-stk" style="display:none" onclick="unfreezeGroup('stock')">解凍</button>
               </div>
             </div>
-            <div class="card-body">
-              <div class="risk-wrap">
-                <div class="risk-label-row">
-                  <span style="color:var(--text)">回撤使用率</span>
-                  <span style="font-family:var(--mono);font-size:13px" id="stk-dd-label">0% / 10%</span>
-                </div>
-                <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="stk-dd-bar" style="width:0%"></div></div>
-              </div>
-              <div class="three-col-grid">
+            
+           <div class="card-body">
+              <div class="metric-row" style="margin-top: 4px;">
                 <div class="metric">
-                  <div class="metric-label">最大回撤</div>
-                  <div class="metric-val neutral" id="stk-dd-val">0.00%</div>
-                </div>
-                <div class="metric">
-                  <div class="metric-label">資金使用</div>
+                  <div class="metric-label">資金使用率</div>
                   <div class="metric-val neutral" id="stk-util">0%</div>
                 </div>
                 <div class="metric">
