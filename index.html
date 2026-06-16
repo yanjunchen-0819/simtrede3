@@ -3659,7 +3659,7 @@ function rebuildPortfolioFromTimeline() {
     ...state.portfolioEvents.map(ev => ({
       kind: 'event',
       sortDate: ev.event_date || '9999-12-31',
-      sortTime: '08:59:59',
+      sortTime: '23:59:59',
       data: ev
     }))
   ].sort((a, b) => `${a.sortDate} ${a.sortTime} ${a.kind}`.localeCompare(`${b.sortDate} ${b.sortTime} ${b.kind}`));
