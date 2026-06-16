@@ -1730,16 +1730,20 @@ function getTickerSymbols(grp = state.group) {
   const pick = new Set();
   (state.customTickers[grp] || []).forEach(sym => pick.add(sym));
 
-  const fallback = Object.keys(state.securities)
+  const dbSymbols = Object.keys(state.securities)
     .filter(sym => state.securities[sym].grp === grp)
-    .slice(0, 8);
-  if (!pick.size) {
-    fallback.forEach(sym => pick.add(sym));
-    state.customTickers[grp] = Array.from(pick);
+    .sort((a, b) => normalizeCleanSymbolPatch(a).localeCompare(normalizeCleanSymbolPatch(b)));
+  dbSymbols.forEach(sym => pick.add(sym));
+
+  const merged = Array.from(pick).filter(sym => state.securities[sym] && state.securities[sym].grp === grp);
+  const prev = JSON.stringify(state.customTickers[grp] || []);
+  const next = JSON.stringify(merged);
+  if (prev !== next) {
+    state.customTickers[grp] = merged;
     saveTickerPrefs();
   }
 
-  return Array.from(pick).filter(sym => state.securities[sym] && state.securities[sym].grp === grp);
+  return merged;
 }
 
 function renderTickerRow(sym, grp = state.group) {
@@ -5865,6 +5869,161 @@ const originalSetGroupPatch = setGroup;
 setGroup = function setGroupPatched(grp) {
   originalSetGroupPatch(grp);
   renderPendingList();
+};
+
+function mergeVisibleSecuritiesPatch(grp) {
+  const symbols = Object.keys(state.securities || {})
+    .filter(sym => state.securities[sym]?.grp === grp);
+  state.customTickers[grp] = state.customTickers[grp] || [];
+  let changed = false;
+  symbols.forEach(sym => {
+    if (!state.customTickers[grp].includes(sym)) {
+      state.customTickers[grp].push(sym);
+      changed = true;
+    }
+  });
+  if (changed) saveTickerPrefs();
+}
+
+function mergeAllVisibleSecuritiesPatch() {
+  mergeVisibleSecuritiesPatch('etf');
+  mergeVisibleSecuritiesPatch('stock');
+}
+
+const previousFetchInitialPricesForSyncPatch = fetchInitialPrices;
+fetchInitialPrices = async function fetchInitialPricesSyncPatched() {
+  await previousFetchInitialPricesForSyncPatch();
+  mergeAllVisibleSecuritiesPatch();
+  renderTickers();
+  updateOrderSymbols();
+};
+
+submitPortfolioAdjustmentPatch = async function submitPortfolioAdjustmentPatched() {
+  const grp = qs('adjust-grp')?.value || state.group;
+  const eventType = qs('adjust-type')?.value || 'cash_dividend';
+  const inputSymbol = normalizeSymbolInput(qs('adjust-symbol')?.value || '');
+  const eventDate = qs('adjust-date')?.value || new Date().toISOString().slice(0, 10);
+  const value = +(qs('adjust-value')?.value || 0);
+
+  if (!inputSymbol) { toast('請輸入商品代號', 'warn'); return; }
+  if (!value || value <= 0) { toast('請輸入大於 0 的調整數值', 'warn'); return; }
+
+  const cleanInput = normalizeCleanSymbolPatch(inputSymbol);
+  const heldPos = (state.groups[grp]?.positions || []).find(p =>
+    p.symbol === inputSymbol || normalizeCleanSymbolPatch(p.symbol) === cleanInput
+  );
+  if (!heldPos) {
+    toast('目前該組沒有這檔持股，無法做手動調整', 'warn');
+    return;
+  }
+
+  const symbol = heldPos.symbol;
+  const ev = {
+    grp,
+    group: grp,
+    symbol,
+    event_type: eventType,
+    event_date: eventDate,
+    cash_amount: eventType === 'cash_dividend' ? value : 0,
+    share_delta: eventType === 'stock_dividend' ? value : 0,
+    qty_delta: eventType === 'stock_dividend' ? value : 0
+  };
+  const { data, error } = await db.from('portfolio_events').insert([ev]).select('*').single();
+  if (error) { toast('新增調整失敗：' + error.message, 'danger'); return; }
+
+  const normalized = {
+    ...(data || ev),
+    grp: (data || ev).grp || (data || ev).group || grp,
+    event_type: (data || ev).event_type || eventType,
+    event_date: (data || ev).event_date || eventDate,
+    cash_amount: (data || ev).cash_amount ?? 0,
+    share_delta: (data || ev).share_delta ?? (data || ev).qty_delta ?? 0
+  };
+
+  state.portfolioEvents.push(normalized);
+  rebuildPortfolioFromTimeline();
+  updateAllMetrics();
+  renderHistory();
+  renderPositions();
+  renderAdjustmentHistoryPatch();
+  qs('adjust-value').value = '';
+  toast(eventType === 'cash_dividend' ? '現金股利調整已新增' : '股票股利調整已新增', 'success');
+};
+
+function applySecurityRowRealtimePatch(item) {
+  if (!item?.symbol) return;
+  const prev = state.securities[item.symbol] || {};
+  const nextPrice = isValidPricePatch(item.price) ? +item.price : prev.price;
+  const nextBase = isValidPricePatch(item.base) ? +item.base : prev.base;
+  state.securities[item.symbol] = {
+    ...prev,
+    ...item,
+    price: nextPrice,
+    base: nextBase,
+    change: isValidPricePatch(nextPrice) && isValidPricePatch(nextBase) ? nextPrice - nextBase : 0,
+    changeRate: isValidPricePatch(nextPrice) && isValidPricePatch(nextBase) && nextBase > 0 ? ((nextPrice - nextBase) / nextBase) * 100 : 0,
+    quote_time: item.quote_time ?? item.quoteTime ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at ?? prev.quote_time
+  };
+  mergeVisibleSecuritiesPatch(state.securities[item.symbol].grp);
+}
+
+setupRealtime = function setupRealtimeSyncPatched() {
+  db.channel('sec-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'securities' }, payload => {
+      const item = payload.new || payload.old;
+      if (!item?.symbol) return;
+
+      if (payload.eventType === 'DELETE') {
+        delete state.securities[item.symbol];
+        Object.keys(state.customTickers || {}).forEach(grp => {
+          state.customTickers[grp] = (state.customTickers[grp] || []).filter(sym => sym !== item.symbol);
+        });
+        saveTickerPrefs();
+      } else {
+        const old = state.securities[item.symbol]?.price;
+        applySecurityRowRealtimePatch(item);
+        const next = state.securities[item.symbol]?.price;
+        if (isValidPricePatch(old) && isValidPricePatch(next) && Math.abs(next - old) > 0.001) {
+          flashRow(item.symbol, next > old ? 'up' : 'down');
+        }
+      }
+
+      renderTickers();
+      updateOrderSymbols();
+      updateOrderPrice();
+      renderPositions();
+      updateAllMetrics();
+      setText('quote-update-time', nowTime());
+    }).subscribe();
+
+  db.channel('order-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async () => {
+      await loadOrdersFromDB();
+      rebuildPortfolioFromTimeline();
+      updateAllMetrics();
+      renderHistory();
+      renderTradeReport();
+      renderPerformanceReport();
+      renderPendingList();
+    }).subscribe();
+
+  db.channel('portfolio-event-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'portfolio_events' }, async () => {
+      await loadPortfolioEventsFromDB();
+      rebuildPortfolioFromTimeline();
+      updateAllMetrics();
+      renderHistory();
+      renderTradeReport();
+      renderPerformanceReport();
+      renderPositions();
+      renderAdjustmentHistoryPatch();
+    }).subscribe();
+
+  db.channel('corporate-action-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'corporate_actions' }, async () => {
+      await loadDividendForecasts();
+      renderDividendForecastReport();
+    }).subscribe();
 };
 
 // ===== SimTrade minimal patch END =====
