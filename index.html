@@ -5074,25 +5074,56 @@ const originalRebuildPortfolioFromTimelinePatch = rebuildPortfolioFromTimeline;
 rebuildPortfolioFromTimeline = function rebuildPortfolioFromTimelinePatched() {
   const allEvents = state.portfolioEvents || [];
   const activeEvents = allEvents.filter(ev => !isVoidedPortfolioEventPatch(ev));
-  const stockDividendEvents = activeEvents
-    .filter(ev => String(ev?.event_type || ev?.eventtype || '') === 'stock_dividend')
-    .map(ev => ({
-      ...ev,
-      grp: ev.grp || ev.group,
-      event_type: ev.event_type || ev.eventtype,
-      event_date: ev.event_date || ev.eventdate || ev.date,
-      share_delta: ev.share_delta ?? ev.sharedelta ?? ev.qty_delta ?? 0
-    }))
-    .sort((a, b) => `${a.event_date || ''} ${a.created_at || ''}`.localeCompare(`${b.event_date || ''} ${b.created_at || ''}`));
-
   state.portfolioEvents = activeEvents.filter(ev => String(ev?.event_type || ev?.eventtype || '') !== 'stock_dividend');
   try {
     originalRebuildPortfolioFromTimelinePatch();
   } finally {
     state.portfolioEvents = allEvents;
   }
-  stockDividendEvents.forEach(ev => replayPortfolioEvent(ev));
+  applyStockDividendAdjustmentsPatch(activeEvents);
 };
+
+function applyStockDividendAdjustmentsPatch(sourceEvents = state.portfolioEvents || []) {
+  const activeEvents = (sourceEvents || [])
+    .filter(ev => !isVoidedPortfolioEventPatch(ev))
+    .filter(ev => String(ev?.event_type || ev?.eventtype || '') === 'stock_dividend')
+    .map(ev => ({
+      ...ev,
+      grp: ev.grp || ev.group,
+      event_type: ev.event_type || ev.eventtype,
+      event_date: ev.event_date || ev.eventdate || ev.date,
+      share_delta: Number(ev.share_delta ?? ev.sharedelta ?? ev.qty_delta ?? 0),
+      cleanSymbol: normalizeCleanSymbolPatch(ev.symbol || '')
+    }))
+    .filter(ev => ev.cleanSymbol && Number.isFinite(ev.share_delta) && ev.share_delta !== 0)
+    .sort((a, b) => `${a.event_date || ''} ${a.created_at || ''}`.localeCompare(`${b.event_date || ''} ${b.created_at || ''}`));
+
+  const applied = new Set();
+  activeEvents.forEach(ev => {
+    const key = `${ev.id || ''}|${ev.grp || ''}|${ev.cleanSymbol}|${ev.share_delta}|${ev.event_date || ''}|${ev.created_at || ''}`;
+    if (applied.has(key)) return;
+    applied.add(key);
+
+    const targetGroups = ev.grp && state.groups?.[ev.grp]
+      ? [state.groups[ev.grp], ...Object.entries(state.groups).filter(([k]) => k !== ev.grp).map(([, g]) => g)]
+      : Object.values(state.groups || {});
+
+    const pos = targetGroups
+      .flatMap(g => (g?.positions || []).map(p => ({ group: g, pos: p })))
+      .find(item => normalizeCleanSymbolPatch(item.pos.symbol) === ev.cleanSymbol);
+
+    if (!pos) return;
+
+    const oldQty = Number(pos.pos.qty || 0);
+    const delta = Number(ev.share_delta || 0);
+    const newQty = oldQty + delta;
+    if (!(newQty > 0)) return;
+
+    const oldCost = Number(pos.pos.avgPrice || 0) * oldQty;
+    pos.pos.qty = newQty;
+    pos.pos.avgPrice = newQty > 0 ? oldCost / newQty : Number(pos.pos.avgPrice || 0);
+  });
+}
 
 renderPerformanceReport = function renderPerformanceReportPatched() {
   const el = qs('report-performance');
@@ -6045,7 +6076,6 @@ function sharedSettingsPayloadPatch() {
       etf: Array.from(new Set(state.customTickers?.etf || [])),
       stock: Array.from(new Set(state.customTickers?.stock || []))
     },
-    forceMarketOpen: !!isTestMarketOpenEnabledPatch(),
     limits: {
       etf: Number(state.limits?.etf || 10),
       stk: Number(state.limits?.stk || 10)
@@ -6080,10 +6110,6 @@ async function loadSharedSettingsPatch() {
       ...state.limits,
       ...value.limits
     };
-  }
-
-  if (typeof value?.forceMarketOpen === 'boolean') {
-    setTestMarketOpenEnabledPatch(value.forceMarketOpen);
   }
 
   mergeAllVisibleSecuritiesPatch();
@@ -6159,6 +6185,7 @@ init = async function initSharedSettingsPatched() {
   if (qs('period-start')) qs('period-start').value = today;
   if (qs('period-end'))   qs('period-end').value   = next7;
 
+  setTestMarketOpenEnabledPatch(false);
   updateMarketStatusBanner();
   loadTickerPrefs();
   await loadSharedSettingsPatch();
