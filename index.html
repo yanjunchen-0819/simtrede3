@@ -3042,7 +3042,11 @@ function renderPerformanceReport() {
 }
 
 function renderDividendForecastReport() {
-  
+  const el = qs('report-dividends');
+  if (!el) return;
+  const rows = [...(state.dividendForecasts || [])].sort((a, b) => `${a.ex_date || a.exDate || ''}`.localeCompare(`${b.ex_date || b.exDate || ''}`));
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty-state">目前無未來除權息資料</div>';
     return;
   }
   el.innerHTML = rows.map(d => {
@@ -3704,11 +3708,22 @@ async function loadPortfolioEventsFromDB() {
 }
 
 async function loadDividendForecasts() {
- state.dividendForecasts = [];
+  const today = new Date().toISOString().slice(0, 10);
+  const { data, error } = await db.from('corporate_actions')
+    .select('*')
+    .gte('ex_date', today)
+    .eq('status', 'active')
+    .order('ex_date', { ascending: true });
+  if (error || !data) return;
+  state.dividendForecasts = data;
 }
 
 async function runAutoCorporateActions() {
-  return;
+  try {
+    await db.functions.invoke('apply-corporate-actions');
+  } catch (e) {
+    console.warn('apply-corporate-actions failed', e);
+  }
 }
 
 async function clearOrdersFromDB() {
@@ -4250,12 +4265,21 @@ function ensureAdjustmentUI() {
         <input type="number" id="adjust-value" min="0" step="1" placeholder="股息填金額，股數調整填新增股數">
       </div>
       <button class="btn btn-full btn-primary" onclick="submitPortfolioAdjustmentPatch()">新增調整</button>
-      <div id="adjust-history-list" style="margin-top:14px"></div>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn" id="adjust-history-toggle" style="width:100%;display:flex;align-items:center;justify-content:space-between" onclick="toggleAdjustmentHistoryPatch()">
+          <span>最近人工調整 / 除權息紀錄</span>
+          <span id="adjust-history-toggle-icon">展開</span>
+        </button>
+        <div id="adjust-history-wrap" style="display:none;margin-top:12px">
+          <div id="adjust-history-list"></div>
+        </div>
+      </div>
     </div>
   `;
   riskCol.appendChild(card);
   const dateEl = document.getElementById('adjust-date');
   if (dateEl && !dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+  syncAdjustmentHistoryCollapsePatch();
   renderAdjustmentHistoryPatch();
 }
 
@@ -4293,6 +4317,23 @@ async function submitPortfolioAdjustmentPatch() {
 
 function isVoidedPortfolioEventPatch(ev) {
   return String(ev?.event_type || '').startsWith('voided_');
+}
+
+function isAdjustmentHistoryExpandedPatch() {
+  return window.__adjustHistoryExpandedPatch === true;
+}
+
+function syncAdjustmentHistoryCollapsePatch() {
+  const wrap = qs('adjust-history-wrap');
+  const icon = qs('adjust-history-toggle-icon');
+  const expanded = isAdjustmentHistoryExpandedPatch();
+  if (wrap) wrap.style.display = expanded ? '' : 'none';
+  if (icon) icon.textContent = expanded ? '收起' : '展開';
+}
+
+function toggleAdjustmentHistoryPatch() {
+  window.__adjustHistoryExpandedPatch = !isAdjustmentHistoryExpandedPatch();
+  syncAdjustmentHistoryCollapsePatch();
 }
 
 function renderAdjustmentHistoryPatch() {
