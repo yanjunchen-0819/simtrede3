@@ -1192,7 +1192,14 @@ const mono = n => n == null ? '—' : n.toLocaleString('zh-TW', {minimumFraction
 const money = n => n == null ? '—' : '$' + mono(Math.round(n));
 const pct = n => n == null ? '—' : (n > 0 ? '+' : '') + n.toFixed(2) + '%';
 const nowTime = () => new Date().toTimeString().slice(0,8);
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+const uid = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
 const qs = id => document.getElementById(id);
 const formatPrice = n => {
   if (n == null || Number.isNaN(+n)) return '—';
