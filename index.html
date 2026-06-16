@@ -4554,7 +4554,6 @@ function extractQuoteTimePatch(item) {
 
 async function fetchQuoteWithEndpointFallbackPatch(payload, supabaseKeyValue) {
   const endpoints = [
-    `${supabaseUrl}/functions/v1/stock-yahoo-live`,
     `${supabaseUrl}/functions/v1/stock-yahoo`
   ];
   let lastError = null;
@@ -4597,7 +4596,7 @@ async function invokeQuoteFunctionPatch(name, payload) {
 }
 
 async function fetchQuoteWithFunctionFallbackPatch(payload, supabaseKeyValue) {
-  const functionNames = ['stock-yahoo-live', 'stock-yahoo'];
+  const functionNames = ['stock-yahoo'];
   let lastError = null;
 
   for (const name of functionNames) {
