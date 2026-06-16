@@ -5073,12 +5073,25 @@ updateAllMetrics = function updateAllMetricsPatched() {
 const originalRebuildPortfolioFromTimelinePatch = rebuildPortfolioFromTimeline;
 rebuildPortfolioFromTimeline = function rebuildPortfolioFromTimelinePatched() {
   const allEvents = state.portfolioEvents || [];
-  state.portfolioEvents = allEvents.filter(ev => !isVoidedPortfolioEventPatch(ev));
+  const activeEvents = allEvents.filter(ev => !isVoidedPortfolioEventPatch(ev));
+  const stockDividendEvents = activeEvents
+    .filter(ev => String(ev?.event_type || ev?.eventtype || '') === 'stock_dividend')
+    .map(ev => ({
+      ...ev,
+      grp: ev.grp || ev.group,
+      event_type: ev.event_type || ev.eventtype,
+      event_date: ev.event_date || ev.eventdate || ev.date,
+      share_delta: ev.share_delta ?? ev.sharedelta ?? ev.qty_delta ?? 0
+    }))
+    .sort((a, b) => `${a.event_date || ''} ${a.created_at || ''}`.localeCompare(`${b.event_date || ''} ${b.created_at || ''}`));
+
+  state.portfolioEvents = activeEvents.filter(ev => String(ev?.event_type || ev?.eventtype || '') !== 'stock_dividend');
   try {
     originalRebuildPortfolioFromTimelinePatch();
   } finally {
     state.portfolioEvents = allEvents;
   }
+  stockDividendEvents.forEach(ev => replayPortfolioEvent(ev));
 };
 
 renderPerformanceReport = function renderPerformanceReportPatched() {
