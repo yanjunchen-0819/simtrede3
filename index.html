@@ -6533,6 +6533,11 @@ updateMarketStatusBanner = function updateMarketStatusBannerPatched() {
   if (txtEl) txtEl.textContent = text;
 };
 
+updateMarketStatusBanner();
+setInterval(() => {
+  try { updateMarketStatusBanner(); } catch {}
+}, 1000);
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
