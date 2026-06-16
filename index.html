@@ -3719,11 +3719,7 @@ async function loadDividendForecasts() {
 }
 
 async function runAutoCorporateActions() {
-  try {
-    await db.functions.invoke('apply-corporate-actions');
-  } catch (e) {
-    console.warn('apply-corporate-actions failed', e);
-  }
+  return;
 }
 
 async function clearOrdersFromDB() {
