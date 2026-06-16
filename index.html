@@ -6178,6 +6178,7 @@ triggerPriceUpdate = async function triggerPriceUpdateUiPatched(forceDebug = fal
   renderTickers();
   renderPositions();
   updateOrderPrice();
+  syncQuotePillPatch();
   return result;
 };
 
@@ -6186,7 +6187,73 @@ init = async function initAutoQuotePatched() {
   await previousInitAutoQuotePatch();
   await triggerPriceUpdate(false);
   updateAllMetrics();
-  setInterval(() => triggerPriceUpdate(false), 30000);
+  syncQuotePillPatch();
+  setInterval(() => triggerPriceUpdate(false), 10000);
+};
+
+function syncQuotePillPatch() {
+  const dot = qs('price-dot');
+  const txt = qs('price-txt');
+  const timeEl = qs('quote-update-time');
+  const securities = Object.values(state.securities || {});
+  const latestQuoted = securities
+    .filter(s => isValidPricePatch(s?.price))
+    .sort((a, b) => {
+      const ta = new Date(a?.quote_time || a?.quoteTime || a?.updated_at || 0).getTime() || 0;
+      const tb = new Date(b?.quote_time || b?.quoteTime || b?.updated_at || 0).getTime() || 0;
+      return tb - ta;
+    })[0];
+
+  const displayTime = latestQuoted?.quote_time || latestQuoted?.quoteTime || latestQuoted?.updated_at || null;
+  if (displayTime) {
+    const t = new Date(displayTime);
+    const timeText = Number.isFinite(t.getTime()) ? t.toTimeString().slice(0, 8) : nowTime();
+    if (dot) dot.className = 'live';
+    if (txt) txt.textContent = `Yahoo 報價 · ${timeText}`;
+    if (timeEl) timeEl.textContent = timeText;
+  } else {
+    if (dot) dot.className = '';
+    if (txt) txt.textContent = 'Yahoo 報價';
+  }
+}
+
+const MDD_LIMIT_DISABLED_PATCH = 999999;
+state.limits.etf = MDD_LIMIT_DISABLED_PATCH;
+state.limits.stk = MDD_LIMIT_DISABLED_PATCH;
+
+const previousUpdateLimitsNoCapPatch = updateLimits;
+updateLimits = function updateLimitsNoCapPatched() {
+  state.limits.etf = MDD_LIMIT_DISABLED_PATCH;
+  state.limits.stk = MDD_LIMIT_DISABLED_PATCH;
+  if (typeof previousUpdateLimitsNoCapPatch === 'function') {
+    try { previousUpdateLimitsNoCapPatch(); } catch {}
+  }
+  updateAllMetrics();
+};
+
+const previousUpdateAllMetricsNoCapPatch = updateAllMetrics;
+updateAllMetrics = function updateAllMetricsNoCapPatched() {
+  previousUpdateAllMetricsNoCapPatch();
+  ['etf', 'stock'].forEach(grp => {
+    const prefix = grp === 'etf' ? 'etf' : 'stk';
+    const dd = calcDD(grp);
+    const bar = qs(`${prefix}-dd-bar`);
+    setText(`${prefix}-dd-label`, `${dd.toFixed(1)}% / 無上限`);
+    setText(`${prefix}-dd-val`, dd.toFixed(2) + '%', 'var(--text)');
+    if (bar) {
+      bar.style.width = Math.min(Math.max(dd, 0), 100) + '%';
+      bar.className = 'risk-bar-fill ok';
+    }
+  });
+};
+
+const previousSyncSettingsFormNoCapPatch = syncSettingsFormFromStatePatch;
+syncSettingsFormFromStatePatch = function syncSettingsFormNoCapPatched() {
+  previousSyncSettingsFormNoCapPatch();
+  const etfLimit = qs('etf-dd-limit');
+  const stkLimit = qs('stk-dd-limit');
+  if (etfLimit) etfLimit.value = '';
+  if (stkLimit) stkLimit.value = '';
 };
 
 // ===== SimTrade minimal patch END =====
