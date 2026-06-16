@@ -3619,23 +3619,27 @@ function replayOrder(order) {
 }
 
 function replayPortfolioEvent(ev) {
-  const grp = ev.grp;
+  const grp = ev.grp || ev.group;
   const g = state.groups[grp];
   if (!g) return;
   if (!g.replayMarks) g.replayMarks = {};
 
-  const cashAmount = +(ev.cash_amount || 0);
-  const shareDelta = +(ev.share_delta || 0);
+  const eventType = ev.event_type || ev.eventtype;
+  const cashAmount = +(ev.cash_amount || ev.cashamount || 0);
+  const shareDelta = +(ev.share_delta || ev.sharedelta || ev.qty_delta || 0);
   const symbol = ev.symbol;
+  const cleanSymbol = normalizeCleanSymbolPatch(symbol);
 
-  if (ev.event_type === 'cash_dividend') {
+  if (eventType === 'cash_dividend') {
     g.totalDividend += cashAmount;
     g.realizedPnl += cashAmount;
     g.cash += cashAmount;
   }
 
-  if (ev.event_type === 'stock_dividend') {
-    const pos = g.positions.find(p => p.symbol === symbol);
+  if (eventType === 'stock_dividend') {
+    const pos = g.positions.find(p =>
+      p.symbol === symbol || normalizeCleanSymbolPatch(p.symbol) === cleanSymbol
+    );
     if (!pos) return;
     const oldQty = +pos.qty;
     const oldCost = (+pos.avgPrice) * oldQty;
@@ -3700,7 +3704,14 @@ async function loadPortfolioEventsFromDB() {
     .order('event_date', { ascending: true })
     .order('created_at', { ascending: true });
   if (error || !data) return;
-  state.portfolioEvents = data;
+  state.portfolioEvents = data.map(ev => ({
+    ...ev,
+    grp: ev.grp || ev.group,
+    event_type: ev.event_type || ev.eventtype,
+    event_date: ev.event_date || ev.eventdate || ev.date,
+    cash_amount: ev.cash_amount ?? ev.cashamount ?? 0,
+    share_delta: ev.share_delta ?? ev.sharedelta ?? ev.qty_delta ?? 0
+  }));
 }
 
 async function loadDividendForecasts() {
