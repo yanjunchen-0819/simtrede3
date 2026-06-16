@@ -6013,6 +6013,166 @@ setupRealtime = function setupRealtimeSyncPatched() {
     }).subscribe();
 };
 
+const SHARED_SETTINGS_KEY_PATCH = 'global';
+let sharedSettingsLoadedPatch = false;
+let sharedSettingsSavingPatch = null;
+
+function syncSettingsFormFromStatePatch() {
+  const etfLimit = qs('etf-dd-limit');
+  const stkLimit = qs('stk-dd-limit');
+  if (etfLimit) etfLimit.value = state.limits?.etf ?? 10;
+  if (stkLimit) stkLimit.value = state.limits?.stk ?? 10;
+  refreshTestMarketOpenUiPatch();
+}
+
+function sharedSettingsPayloadPatch() {
+  return {
+    customTickers: {
+      etf: Array.from(new Set(state.customTickers?.etf || [])),
+      stock: Array.from(new Set(state.customTickers?.stock || []))
+    },
+    forceMarketOpen: !!isTestMarketOpenEnabledPatch(),
+    limits: {
+      etf: Number(state.limits?.etf || 10),
+      stk: Number(state.limits?.stk || 10)
+    }
+  };
+}
+
+async function loadSharedSettingsPatch() {
+  const { data, error } = await db
+    .from('app_settings')
+    .select('key,value,updated_at')
+    .eq('key', SHARED_SETTINGS_KEY_PATCH)
+    .maybeSingle();
+
+  if (error) {
+    console.warn('loadSharedSettingsPatch failed:', error);
+    return;
+  }
+
+  const value = data?.value || {};
+  const sharedTickers = value?.customTickers || {};
+  const mergedEtf = Array.from(new Set([...(state.customTickers?.etf || []), ...(sharedTickers.etf || [])]));
+  const mergedStock = Array.from(new Set([...(state.customTickers?.stock || []), ...(sharedTickers.stock || [])]));
+
+  state.customTickers = {
+    etf: mergedEtf,
+    stock: mergedStock
+  };
+
+  if (value?.limits && typeof value.limits === 'object') {
+    state.limits = {
+      ...state.limits,
+      ...value.limits
+    };
+  }
+
+  if (typeof value?.forceMarketOpen === 'boolean') {
+    setTestMarketOpenEnabledPatch(value.forceMarketOpen);
+  }
+
+  mergeAllVisibleSecuritiesPatch();
+  saveTickerPrefs();
+  sharedSettingsLoadedPatch = true;
+  syncSettingsFormFromStatePatch();
+}
+
+async function saveSharedSettingsPatch() {
+  if (!sharedSettingsLoadedPatch) return;
+
+  const payload = sharedSettingsPayloadPatch();
+  const { error } = await db
+    .from('app_settings')
+    .upsert([{
+      key: SHARED_SETTINGS_KEY_PATCH,
+      value: payload,
+      updated_at: new Date().toISOString()
+    }], { onConflict: 'key' });
+
+  if (error) {
+    console.warn('saveSharedSettingsPatch failed:', error);
+  }
+}
+
+function scheduleSaveSharedSettingsPatch() {
+  if (!sharedSettingsLoadedPatch) return;
+  if (sharedSettingsSavingPatch) clearTimeout(sharedSettingsSavingPatch);
+  sharedSettingsSavingPatch = setTimeout(() => {
+    sharedSettingsSavingPatch = null;
+    saveSharedSettingsPatch();
+  }, 250);
+}
+
+function setupSharedSettingsRealtimePatch() {
+  db.channel('app-settings-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_settings' }, async payload => {
+      const row = payload.new || payload.old;
+      if (!row || row.key !== SHARED_SETTINGS_KEY_PATCH) return;
+
+      await loadSharedSettingsPatch();
+      renderTickers();
+      updateOrderSymbols();
+      updateOrderPrice();
+      renderPositions();
+      updateAllMetrics();
+      renderPendingList();
+    }).subscribe();
+}
+
+const originalSaveTickerPrefsForSharedPatch = saveTickerPrefs;
+saveTickerPrefs = function saveTickerPrefsSharedPatched() {
+  originalSaveTickerPrefsForSharedPatch();
+  scheduleSaveSharedSettingsPatch();
+};
+
+const originalToggleTestMarketOpenForSharedPatch = toggleTestMarketOpenPatch;
+toggleTestMarketOpenPatch = async function toggleTestMarketOpenSharedPatched(enabled) {
+  await originalToggleTestMarketOpenForSharedPatch(enabled);
+  scheduleSaveSharedSettingsPatch();
+};
+
+const originalUpdateLimitsForSharedPatch = updateLimits;
+updateLimits = function updateLimitsSharedPatched() {
+  originalUpdateLimitsForSharedPatch();
+  scheduleSaveSharedSettingsPatch();
+};
+
+const originalInitForSharedPatch = init;
+init = async function initSharedSettingsPatched() {
+  const today = new Date().toISOString().slice(0,10);
+  const next7 = new Date(Date.now() + 7*86400000).toISOString().slice(0,10);
+  if (qs('period-start')) qs('period-start').value = today;
+  if (qs('period-end'))   qs('period-end').value   = next7;
+
+  updateMarketStatusBanner();
+  loadTickerPrefs();
+  await loadSharedSettingsPatch();
+  initDebugPanel();
+  refreshTestMarketOpenUiPatch();
+  setupRealtime();
+  setupSharedSettingsRealtimePatch();
+  await fetchInitialPrices();
+  await runAutoCorporateActions();
+  await loadOrdersFromDB();
+  await loadPortfolioEventsFromDB();
+  await loadDividendForecasts();
+  rebuildPortfolioFromTimeline();
+  updateAllMetrics();
+  renderHistory();
+  renderPendingList();
+  renderTickers();
+  renderPositions();
+  renderTradeReport();
+  renderPerformanceReport();
+  renderDividendForecastReport();
+  renderAdjustmentHistoryPatch();
+  updateOrderSymbols();
+  updateOrderPrice();
+  updateNavMini();
+  renderNavChart();
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
