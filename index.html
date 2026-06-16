@@ -4503,6 +4503,32 @@ async function fetchQuoteWithEndpointFallbackPatch(payload, supabaseKeyValue) {
   return { ok: false, endpoint: endpoints[endpoints.length - 1], data: {}, error: lastError };
 }
 
+async function invokeQuoteFunctionPatch(name, payload) {
+  try {
+    const { data, error } = await db.functions.invoke(name, { body: payload });
+    if (error) return { ok: false, name, data: {}, error };
+    return { ok: true, name, data: data || {} };
+  } catch (error) {
+    return { ok: false, name, data: {}, error };
+  }
+}
+
+async function fetchQuoteWithFunctionFallbackPatch(payload, supabaseKeyValue) {
+  const functionNames = ['stock-yahoo-live', 'stock-yahoo'];
+  let lastError = null;
+
+  for (const name of functionNames) {
+    const invoked = await invokeQuoteFunctionPatch(name, payload);
+    if (invoked.ok) return { ok: true, endpoint: name, data: invoked.data };
+    lastError = invoked.error;
+  }
+
+  return fetchQuoteWithEndpointFallbackPatch(payload, supabaseKeyValue).then(result => {
+    if (!result.ok && !result.error) result.error = lastError;
+    return result;
+  });
+}
+
 triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false) {
   const dot = qs('price-dot');
   if (dot) dot.className = '';
@@ -4533,7 +4559,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
 
     let usedBatch = false;
     try {
-      const batchResult = await fetchQuoteWithEndpointFallbackPatch({ symbols, range: '1d', interval: '1m' }, supabaseKey);
+      const batchResult = await fetchQuoteWithFunctionFallbackPatch({ symbols, range: '1d', interval: '1m' }, supabaseKey);
       const batchData = batchResult.data || {};
       const rows = Array.isArray(batchData?.rows) ? batchData.rows
         : Array.isArray(batchData?.quotes) ? batchData.quotes
@@ -4551,7 +4577,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
     if (!usedBatch) {
       for (const symbol of symbols) {
         try {
-          const result = await fetchQuoteWithEndpointFallbackPatch({ symbol, range: '1d', interval: '1m' }, supabaseKey);
+          const result = await fetchQuoteWithFunctionFallbackPatch({ symbol, range: '1d', interval: '1m' }, supabaseKey);
           const data = result.data || {};
           if (!result.ok) continue;
           applyQuote({ ...data, symbol });
