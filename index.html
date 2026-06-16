@@ -3757,7 +3757,7 @@ async function init() {
   refreshTestMarketOpenUiPatch();
   setupRealtime();
   await fetchInitialPrices();
-  await runAutoCorporateActions();
+  
   await loadOrdersFromDB();
   await loadPortfolioEventsFromDB();
   await loadDividendForecasts();
@@ -6220,7 +6220,7 @@ init = async function initSharedSettingsPatched() {
   setupRealtime();
   setupSharedSettingsRealtimePatch();
   await fetchInitialPrices();
-  await runAutoCorporateActions();
+  
   await loadOrdersFromDB();
   await loadPortfolioEventsFromDB();
   await loadDividendForecasts();
