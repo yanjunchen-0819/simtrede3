@@ -853,6 +853,26 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
       </div>
 
       <div class="card">
+        <div class="card-header">
+          <span class="card-title">🧪 盤中測試模式</span>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+            <input type="checkbox" id="test-market-open-toggle" onchange="toggleTestMarketOpenPatch(this.checked)">
+            強制視為盤中
+          </label>
+        </div>
+        <div class="card-body">
+          <div style="font-size:13px;color:var(--text);margin-bottom:10px;line-height:1.6">
+            只在這個瀏覽器生效。開啟後，即使現在不是 09:00-13:30，也會允許用目前報價測試委託成交、持股、損益與報表流程。
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-sm" onclick="toggleTestMarketOpenPatch(false)">關閉測試盤中</button>
+            <button class="btn btn-sm btn-primary" onclick="runTestMarketOpenNowPatch()">立即用目前報價重跑</button>
+          </div>
+          <div id="test-market-open-hint" style="font-size:12px;color:var(--text3);margin-top:10px"></div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-header"><span class="card-title" style="color:var(--red)">重置比賽</span></div>
         <div class="card-body">
           <p style="font-size:13px;color:var(--text);margin-bottom:14px;line-height:1.5">將所有庫存、訂單與資金歸零，重新開始一場新的模擬賽。</p>
@@ -1022,6 +1042,7 @@ const state = {
 
 const TICKER_STORAGE_KEY = 'simtrade_ticker_prefs_v1';
 const DEBUG_PANEL_STORAGE_KEY = 'simtrade_debug_panel_enabled_v1';
+const TEST_MARKET_OPEN_STORAGE_KEY = 'simtrade_force_market_open_v1';
 
 function isDebugPanelEnabled() {
   try { return localStorage.getItem(DEBUG_PANEL_STORAGE_KEY) === '1'; }
@@ -1279,6 +1300,47 @@ function initDebugPanel() {
   if (toggle) toggle.checked = enabled;
   if (wrap) wrap.style.display = enabled ? '' : 'none';
   clearDebugPanel();
+}
+
+function isTestMarketOpenEnabledPatch() {
+  try { return localStorage.getItem(TEST_MARKET_OPEN_STORAGE_KEY) === '1'; }
+  catch { return false; }
+}
+
+function setTestMarketOpenEnabledPatch(enabled) {
+  try {
+    if (enabled) localStorage.setItem(TEST_MARKET_OPEN_STORAGE_KEY, '1');
+    else localStorage.removeItem(TEST_MARKET_OPEN_STORAGE_KEY);
+  } catch {}
+}
+
+function refreshTestMarketOpenUiPatch() {
+  const enabled = isTestMarketOpenEnabledPatch();
+  const toggle = qs('test-market-open-toggle');
+  const hint = qs('test-market-open-hint');
+  if (toggle) toggle.checked = enabled;
+  if (hint) hint.textContent = enabled
+    ? '目前為測試盤中模式：系統會把現在視為可成交測試時段。'
+    : '目前為正常模式：只有真正交易時段才會成交。';
+}
+
+async function toggleTestMarketOpenPatch(enabled) {
+  setTestMarketOpenEnabledPatch(!!enabled);
+  refreshTestMarketOpenUiPatch();
+  updateMarketStatusBanner();
+  updateOrderPrice();
+  if (enabled) toast('已開啟測試盤中模式', 'warn');
+  else toast('已關閉測試盤中模式', 'info');
+}
+
+async function runTestMarketOpenNowPatch() {
+  if (!isTestMarketOpenEnabledPatch()) {
+    setTestMarketOpenEnabledPatch(true);
+    refreshTestMarketOpenUiPatch();
+  }
+  updateMarketStatusBanner();
+  await triggerPriceUpdate(true);
+  await tryExecutePendingOrdersPatch();
 }
 
 window.addEventListener('error', (e) => {
@@ -1909,6 +1971,13 @@ function normalizeOrderFinancials(order) {
 }
 
 function updateMarketStatusBanner() {
+  if (isTestMarketOpenEnabledPatch()) {
+    const clockEl = qs('market-clock');
+    const txtEl   = qs('market-status-txt');
+    if (clockEl) clockEl.className = 'rule-clock open-dot';
+    if (txtEl) txtEl.textContent = '測試盤中模式';
+    return;
+  }
   const twn = getTWNTime();
   const after = checkAfterClose();
   const day = twn.getDay();
@@ -3681,6 +3750,7 @@ async function init() {
   updateMarketStatusBanner();
   loadTickerPrefs();
   initDebugPanel();
+  refreshTestMarketOpenUiPatch();
   setupRealtime();
   await fetchInitialPrices();
   await runAutoCorporateActions();
@@ -3982,17 +4052,20 @@ openDeleteTickerModal = function openManageTickerModalPatch(symbol, grp = state.
 };
 
 function isTradingDayPatch(d = getTWNTime()) {
+  if (isTestMarketOpenEnabledPatch()) return true;
   const day = d.getDay();
   return day !== 0 && day !== 6;
 }
 
 function isMarketOpenPatch(d = getTWNTime()) {
+  if (isTestMarketOpenEnabledPatch()) return true;
   if (!isTradingDayPatch(d)) return false;
   const mins = d.getHours() * 60 + d.getMinutes();
   return mins >= 9 * 60 && mins < 13 * 60 + 30;
 }
 
 function isAfterMarketClosePatch(d = getTWNTime()) {
+  if (isTestMarketOpenEnabledPatch()) return false;
   if (!isTradingDayPatch(d)) return false;
   return getMarketMinutesPatch(d) >= 13 * 60 + 30;
 }
@@ -4044,6 +4117,7 @@ function getQuoteTimePatch(sec) {
 }
 
 function isTodayMarketQuotePatch(sym) {
+  if (isTestMarketOpenEnabledPatch()) return getSecurityPricePatch(sym) != null;
   const s = state.securities?.[sym];
   const quoteTime = getQuoteTimePatch(s);
   if (!quoteTime) return false;
