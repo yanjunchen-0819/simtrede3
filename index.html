@@ -623,11 +623,21 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
                 <button class="btn btn-sm btn-etf" id="unfreeze-etf" style="display:none" onclick="unfreezeGroup('etf')">解凍</button>
               </div>
             </div>
-            
             <div class="card-body">
-              <div class="metric-row" style="margin-top: 4px;">
+              <div class="risk-wrap">
+                <div class="risk-label-row">
+                  <span style="color:var(--text)">回撤使用率</span>
+                  <span style="font-family:var(--mono);font-size:13px" id="etf-dd-label">0% / 10%</span>
+                </div>
+                <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="etf-dd-bar" style="width:0%"></div></div>
+              </div>
+              <div class="three-col-grid">
                 <div class="metric">
-                  <div class="metric-label">資金使用率</div>
+                  <div class="metric-label">最大回撤</div>
+                  <div class="metric-val neutral" id="etf-dd-val">0.00%</div>
+                </div>
+                <div class="metric">
+                  <div class="metric-label">資金使用</div>
                   <div class="metric-val neutral" id="etf-util">0%</div>
                 </div>
                 <div class="metric">
@@ -645,11 +655,21 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
                 <button class="btn btn-sm btn-stk" id="unfreeze-stk" style="display:none" onclick="unfreezeGroup('stock')">解凍</button>
               </div>
             </div>
-            
-           <div class="card-body">
-              <div class="metric-row" style="margin-top: 4px;">
+            <div class="card-body">
+              <div class="risk-wrap">
+                <div class="risk-label-row">
+                  <span style="color:var(--text)">回撤使用率</span>
+                  <span style="font-family:var(--mono);font-size:13px" id="stk-dd-label">0% / 10%</span>
+                </div>
+                <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="stk-dd-bar" style="width:0%"></div></div>
+              </div>
+              <div class="three-col-grid">
                 <div class="metric">
-                  <div class="metric-label">資金使用率</div>
+                  <div class="metric-label">最大回撤</div>
+                  <div class="metric-val neutral" id="stk-dd-val">0.00%</div>
+                </div>
+                <div class="metric">
+                  <div class="metric-label">資金使用</div>
                   <div class="metric-val neutral" id="stk-util">0%</div>
                 </div>
                 <div class="metric">
@@ -3737,7 +3757,7 @@ async function init() {
   refreshTestMarketOpenUiPatch();
   setupRealtime();
   await fetchInitialPrices();
-  
+  await runAutoCorporateActions();
   await loadOrdersFromDB();
   await loadPortfolioEventsFromDB();
   await loadDividendForecasts();
@@ -6200,7 +6220,7 @@ init = async function initSharedSettingsPatched() {
   setupRealtime();
   setupSharedSettingsRealtimePatch();
   await fetchInitialPrices();
-  
+  await runAutoCorporateActions();
   await loadOrdersFromDB();
   await loadPortfolioEventsFromDB();
   await loadDividendForecasts();
@@ -6504,6 +6524,122 @@ saveSharedSettingsPatch = async function saveSharedSettingsExplicitPatched() {
     toast('共用設定同步失敗，請稍後再試', 'warn');
     return;
   }
+};
+
+function getOrderDateKeyFrontendPatch(order) {
+  return String(
+    order?.settlement_date ||
+    order?.settlementdate ||
+    (order?.created_at ? String(order.created_at).slice(0, 10) : '') ||
+    (order?.createdat ? String(order.createdat).slice(0, 10) : '')
+  );
+}
+
+function getTradingDayKeyFrontendPatch() {
+  return getTWNTime().toISOString().slice(0, 10);
+}
+
+function getDayTradeBlockReasonFrontendPatch(sym, side, grp, targetDate = getTradingDayKeyFrontendPatch()) {
+  const cleanSym = resolveOrderSymbolPatch(sym, grp);
+  const executed = (state.orders || []).filter(o =>
+    o &&
+    String(o.status || '').toLowerCase() === 'executed' &&
+    getOrderGroupPatch(o) === grp &&
+    resolveOrderSymbolPatch(o.symbol, getOrderGroupPatch(o)) === cleanSym &&
+    getOrderDateKeyFrontendPatch(o) === targetDate
+  );
+  if (!executed.length) return '';
+
+  const hasBuy = executed.some(o => o.side === 'buy');
+  const hasSell = executed.some(o => o.side === 'sell');
+  if (side === 'sell' && hasBuy) return '禁止當沖：此商品今天已有買入成交，不能於同日賣出';
+  if (side === 'buy' && hasSell) return '禁止當沖：此商品今天已有賣出成交，不能於同日買回';
+  return '';
+}
+
+checkOrderConstraints = function checkOrderConstraintsMeetingPatched(sym, qty, side, grp) {
+  const g = state.groups[grp];
+  const s = state.securities[sym];
+  if (!s) return null;
+
+  const dayTradeReason = getDayTradeBlockReasonFrontendPatch(sym, side, grp);
+  if (dayTradeReason) return dayTradeReason;
+
+  if (side === 'buy') {
+    const existingPos = g.positions.find(p => p.symbol === sym);
+    const existingCost = existingPos ? existingPos.avgPrice * existingPos.qty : 0;
+    const newCost = s.price * qty;
+    if (existingCost + newCost > RULES.MAX_SINGLE_COST) {
+      return `單一標的成本將達 ${money(existingCost + newCost)}，超過 ${money(RULES.MAX_SINGLE_COST)} 上限`;
+    }
+  }
+
+  if (side === 'sell') {
+    const totalCost = g.positions.reduce((sum, p) => sum + p.avgPrice * p.qty, 0);
+    const thisCost = (() => {
+      const p = g.positions.find(x => x.symbol === sym);
+      return p ? p.avgPrice * Math.min(qty, p.qty) : 0;
+    })();
+    if (totalCost > 0 && (totalCost - thisCost) < RULES.MIN_HOLDINGS) {
+      return `賣出後剩餘持股成本將低於 ${money(RULES.MIN_HOLDINGS)} 下限`;
+    }
+  }
+  return null;
+};
+
+const previousTryExecutePendingOrdersDayTradePatch = tryExecutePendingOrdersPatch;
+tryExecutePendingOrdersPatch = async function tryExecutePendingOrdersNoDayTradePatched(changedSymbols = []) {
+  rebuildPendingOrderStatePatch();
+  const today = getTradingDayKeyFrontendPatch();
+  const pendingNow = [...(state.pendingApproval || []), ...(state.approvedPending || [])];
+  for (const order of pendingNow) {
+    const grp = getOrderGroupPatch(order);
+    const sym = resolveOrderSymbolPatch(order.symbol, grp);
+    const side = order.side;
+    const blockReason = getDayTradeBlockReasonFrontendPatch(sym, side, grp, today);
+    if (blockReason) {
+      order.comment = blockReason;
+      try {
+        await db.from('orders').update({ status: 'rejected', comment: blockReason }).eq('id', order.id);
+      } catch {}
+    }
+  }
+  return previousTryExecutePendingOrdersDayTradePatch(changedSymbols);
+};
+
+function normalizeRiskWarningOnlyPatch() {
+  for (const grp of ['etf', 'stock']) {
+    if (state.groups?.[grp]) state.groups[grp].frozen = false;
+    const freezeBanner = qs(`freeze-${grp}`);
+    if (freezeBanner) freezeBanner.style.display = 'none';
+  }
+  const unfreezeEtf = qs('unfreeze-etf');
+  const unfreezeStk = qs('unfreeze-stk');
+  if (unfreezeEtf) unfreezeEtf.style.display = 'none';
+  if (unfreezeStk) unfreezeStk.style.display = 'none';
+}
+
+const previousGetViolationsMeetingPatch = getViolations;
+getViolations = function getViolationsWarningOnlyPatched() {
+  return previousGetViolationsMeetingPatch().map(v => {
+    if (['loss_stop', 'loss_warn', 'pos_loss'].includes(v?.type)) {
+      return { ...v, action: null, actionLabel: null };
+    }
+    return v;
+  });
+};
+
+const previousUpdateAllMetricsMeetingPatch = updateAllMetrics;
+updateAllMetrics = function updateAllMetricsMeetingPatched() {
+  normalizeRiskWarningOnlyPatch();
+  previousUpdateAllMetricsMeetingPatch();
+  normalizeRiskWarningOnlyPatch();
+};
+
+const previousInitMeetingPatch = init;
+init = async function initMeetingPatched() {
+  await previousInitMeetingPatch();
+  normalizeRiskWarningOnlyPatch();
 };
 
 updateMarketStatusBanner = function updateMarketStatusBannerPatched() {
