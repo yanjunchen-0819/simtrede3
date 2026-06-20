@@ -4819,7 +4819,7 @@ async function executeMarketOrder() {
     amount,
     grp,
     status,
-    comment: marketOpen ? '市價直接成交' : (blockReason || '暫不直接成交，改列委託'),
+    comment: marketOpen ? '市價成交：已成交' : '市價委託：等待條件符合後成交',
     settlement_date: tradeDate,
     settlement_price: marketOpen ? execPrice : null,
     fee_rate: feeRate,
@@ -5077,7 +5077,7 @@ async function tryExecutePendingOrdersPatch(changedSymbols = []) {
       tax_rate: taxRate,
       tax_amount: taxAmount,
       settlement_amount: settlementAmount,
-      comment: '委託於盤中報價取得後成交',
+      comment: '市價委託：等待條件符合後成交',
       settlement_date: today,
       scorecard: {
         ...((order && typeof order.scorecard === 'object' && order.scorecard) ? order.scorecard : {}),
@@ -7310,6 +7310,36 @@ updateMarketStatusBanner();
     closed: '\u5df2\u6536\u76e4\uff0813:30 \u5f8c\uff09'
   };
 
+  const normalizeOrderCommentTextPatch = (comment, status) => {
+    const text = String(comment || '').trim();
+    if (text.includes('市價成交：已成交')) return '市價成交：已成交';
+    if (text.includes('市價委託：等待條件符合後成交')) return '市價委託：等待條件符合後成交';
+    if (
+      text.includes('非交易時段委託') ||
+      text.includes('委託於盤中報價取得後成交') ||
+      text.includes('系統自動成交') ||
+      text.includes('尚未取得今天') ||
+      text.includes('盤中報價')
+    ) {
+      return '市價委託：等待條件符合後成交';
+    }
+    if (
+      text.includes('市價直接成交') ||
+      text.includes('測試已成交買單')
+    ) {
+      return '市價成交：已成交';
+    }
+    if (!text && status === 'executed') return '市價成交：已成交';
+    if (!text && (status === 'pending' || status === 'approved')) return '市價委託：等待條件符合後成交';
+    return text;
+  };
+
+  normalizeOrderFinancials = ((prev) => function(order) {
+    const out = prev(order);
+    out.comment = normalizeOrderCommentTextPatch(out.comment, out.status);
+    return out;
+  })(normalizeOrderFinancials);
+
   groupLabelPatch = function(grp) {
     return grp === 'etf' ? TXT.etf : TXT.stock;
   };
@@ -7542,6 +7572,9 @@ updateMarketStatusBanner();
 
   updateMarketStatusBanner();
   ensureCsvExportUI();
+  if (Array.isArray(state.orders)) {
+    state.orders = state.orders.map(o => normalizeOrderFinancials(o));
+  }
 })();
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
