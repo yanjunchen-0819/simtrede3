@@ -1934,6 +1934,8 @@ function getSellTaxRate(symbol, grp) {
 
 function normalizeOrderFinancials(order) {
   const grp = order.group || order.grp;
+  const rawStatus = String(order.status || '').toLowerCase().trim();
+  const scorecard = (order.scorecard && typeof order.scorecard === 'object') ? order.scorecard : {};
   const execPrice = +(order.settlement_price ?? order.settlementprice ?? order.price ?? 0);
   const amount = +(order.amount ?? Math.round(execPrice * (+order.qty || 0)));
   const feeRate = +(order.fee_rate ?? 0.0004);
@@ -1948,6 +1950,18 @@ function normalizeOrderFinancials(order) {
 
   order.group = grp;
   order.grp = grp;
+  order.raw_status = order.status;
+  if (rawStatus === 'filled' || rawStatus === 'done') order.status = 'executed';
+  else if (rawStatus === 'cancelled' || rawStatus === 'canceled') order.status = 'rejected';
+  else if (rawStatus === 'open' || rawStatus === 'queued') order.status = 'pending';
+  else order.status = rawStatus || order.status;
+  order.scorecard = scorecard;
+  if (!order.scorecard.order_submitted_at && (order.created_at || order.createdat)) {
+    order.scorecard.order_submitted_at = order.created_at || order.createdat;
+  }
+  if (order.status === 'executed' && !order.scorecard.executed_at && rawStatus === 'executed' && (order.created_at || order.createdat)) {
+    order.scorecard.executed_at = order.created_at || order.createdat;
+  }
   order.price = execPrice;
   order.amount = amount;
   order.settlement_price = execPrice;
@@ -3116,7 +3130,7 @@ function renderHistory() {
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="order-sym">${o.symbol.replace('.TW','')}</span>
             <span class="badge badge-${o.side}">${o.side==='buy'?'買入':'賣出'}</span>
-            <span class="badge ${o.status==='approved'?'badge-approved':o.status==='executed'?'badge-executed':o.status==='rejected'?'badge-rejected':'badge-pending'}">${{pending:'待審',approved:'待結算',executed:'成交',rejected:'取消'}[o.status]||o.status}</span>
+            <span class="badge ${o.status==='approved'?'badge-approved':o.status==='executed'?'badge-executed':(o.status==='rejected'||o.status==='expired')?'badge-rejected':'badge-pending'}">${{pending:'待審',approved:'待結算',executed:'成交',rejected:'取消',expired:'失效'}[o.status]||o.status}</span>
           </div>
           <div class="order-meta">${o.qty} 股 · 計分 ${o.scorecard.total}/25 · ${o.time}</div>
           ${o.comment ? `<div style="font-size:13px;color:var(--text3);margin-top:4px">💬 ${o.comment}</div>` : ''}
@@ -3518,7 +3532,8 @@ function exportRiskReport() {
       pending: '待成交', 
       approved: '待結算', 
       executed: '已成交', 
-      rejected: '已取消'
+      rejected: '已取消',
+      expired: '已失效'
     };
     const statusStr = statusMap[o.status] || o.status;
     
@@ -4782,6 +4797,8 @@ async function executeMarketOrder() {
   confirmBtn.disabled = true;
 
   const { sym, qty, dir, grp, execPrice, amount, s, marketOpen, blockReason } = pendingOrderData;
+  const nowIso = new Date().toISOString();
+  const submitTime = nowTime();
   const feeRate = 0.0004;
   const feeAmount = Math.round(amount * feeRate);
   const taxRate = dir === 'sell' ? getSellTaxRate(sym, grp) : 0;
@@ -4792,7 +4809,8 @@ async function executeMarketOrder() {
 
   const order = {
     id: uid(),
-    time: marketOpen ? nowTime() : '09:00:00',
+    created_at: nowIso,
+    time: submitTime,
     symbol: sym,
     name: s.name,
     qty,
@@ -4809,7 +4827,10 @@ async function executeMarketOrder() {
     tax_rate: taxRate,
     tax_amount: taxAmount,
     settlement_amount: settlementAmount,
-    scorecard: {}
+    scorecard: {
+      order_submitted_at: nowIso,
+      executed_at: marketOpen ? nowIso : null
+    }
   };
 
   const { error } = await db.from('orders').insert([order]);
@@ -5045,9 +5066,9 @@ async function tryExecutePendingOrdersPatch(changedSymbols = []) {
       continue;
     }
 
+    const execIso = new Date().toISOString();
     const patch = {
       status: 'executed',
-      time: nowTime(),
       price,
       amount,
       settlement_price: price,
@@ -5057,7 +5078,12 @@ async function tryExecutePendingOrdersPatch(changedSymbols = []) {
       tax_amount: taxAmount,
       settlement_amount: settlementAmount,
       comment: '委託於盤中報價取得後成交',
-      settlement_date: today
+      settlement_date: today,
+      scorecard: {
+        ...((order && typeof order.scorecard === 'object' && order.scorecard) ? order.scorecard : {}),
+        order_submitted_at: (order?.scorecard?.order_submitted_at || order?.created_at || order?.createdat || null),
+        executed_at: execIso
+      }
     };
     const { error } = await db.from('orders').update(patch).eq('id', order.id);
     if (error) {
@@ -5725,7 +5751,165 @@ function statusLabelPatch(status) {
   if (status === 'executed') return '已成交';
   if (status === 'pending' || status === 'approved') return '待成交';
   if (status === 'rejected' || status === 'cancelled') return '已取消';
+  if (status === 'expired') return '已失效';
   return status || '';
+}
+
+function orderSubmittedAtPatch(order) {
+  return order?.scorecard?.order_submitted_at || order?.created_at || order?.createdat || '';
+}
+
+function orderExecutedAtPatch(order) {
+  if (!order || order.status !== 'executed') return '';
+  return order?.scorecard?.executed_at || (String(order.raw_status || '').toLowerCase() === 'executed'
+    ? (order?.created_at || order?.createdat || '')
+    : '');
+}
+
+function splitDateTimePatch(raw) {
+  if (!raw) return { date: '', time: '' };
+  const d = new Date(raw);
+  if (!Number.isFinite(d.getTime())) {
+    const text = String(raw);
+    if (text.includes('T')) {
+      const [datePart, timePart] = text.split('T');
+      return { date: datePart || '', time: (timePart || '').slice(0, 8) };
+    }
+    return { date: text.slice(0, 10), time: text.slice(11, 19) };
+  }
+  const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  return {
+    date: local.toISOString().slice(0, 10),
+    time: local.toTimeString().slice(0, 8)
+  };
+}
+
+function realizedTradeRowsPatch() {
+  const books = { etf: {}, stock: {} };
+  const rows = [];
+  const executed = (state.orders || [])
+    .filter(o => o.status === 'executed')
+    .sort((a, b) => {
+      const at = new Date(orderSubmittedAtPatch(a) || a.created_at || 0).getTime() || 0;
+      const bt = new Date(orderSubmittedAtPatch(b) || b.created_at || 0).getTime() || 0;
+      return at - bt;
+    });
+
+  for (const order of executed) {
+    const grp = getOrderGroupPatch(order);
+    const sym = symbolFullPatch(order.symbol);
+    const qty = Number(order.qty || 0);
+    const amount = Number(order.amount || 0);
+    const fee = Number(order.fee_amount || 0);
+    const tax = Number(order.tax_amount || 0);
+    const settlement = Number(order.settlement_amount || (order.side === 'buy' ? amount + fee + tax : amount - fee - tax) || 0);
+    if (!books[grp][sym]) books[grp][sym] = { qty: 0, avgPrice: 0 };
+    const pos = books[grp][sym];
+
+    if (order.side === 'buy') {
+      const buyCost = amount + fee;
+      pos.avgPrice = pos.qty > 0 ? ((pos.avgPrice * pos.qty) + buyCost) / (pos.qty + qty) : (qty > 0 ? buyCost / qty : 0);
+      pos.qty += qty;
+      continue;
+    }
+
+    const avgCost = Number(pos.avgPrice || 0);
+    const costBasis = avgCost * qty;
+    const realized = settlement - costBasis;
+    const submitted = splitDateTimePatch(orderSubmittedAtPatch(order));
+    const executedAt = splitDateTimePatch(orderExecutedAtPatch(order));
+    rows.push([
+      groupLabelPatch(grp),
+      submitted.date,
+      submitted.time,
+      executedAt.date || order.settlement_date || '',
+      executedAt.time,
+      sym,
+      order.name || '',
+      sideLabelPatch(order.side),
+      qty,
+      avgCost,
+      order.settlement_price ?? order.price ?? '',
+      amount,
+      fee,
+      tax,
+      settlement,
+      realized
+    ]);
+
+    pos.qty = Math.max(0, pos.qty - qty);
+    if (pos.qty <= 0) pos.avgPrice = 0;
+  }
+
+  return rows;
+}
+
+function exportExecutedRowsPatch() {
+  return (state.orders || [])
+    .filter(o => o.status === 'executed')
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderExecutedAtPatch(a)).date || a.settlement_date || '';
+      const at = splitDateTimePatch(orderExecutedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderExecutedAtPatch(b)).date || b.settlement_date || '';
+      const bt = splitDateTimePatch(orderExecutedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        groupLabelPatch(getOrderGroupPatch(o)),
+        sideLabelPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        o.qty || 0,
+        o.settlement_price ?? o.price ?? '',
+        o.price ?? '',
+        o.amount || 0,
+        o.fee_amount || 0,
+        o.tax_amount || 0,
+        o.settlement_amount || 0,
+        o.comment || ''
+      ];
+    });
+}
+
+function exportOpenOrderRowsPatch() {
+  return (state.orders || [])
+    .filter(o => o.status !== 'executed')
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderSubmittedAtPatch(a)).date || '';
+      const at = splitDateTimePatch(orderSubmittedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderSubmittedAtPatch(b)).date || '';
+      const bt = splitDateTimePatch(orderSubmittedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        o.settlement_date || '',
+        executedAt.time,
+        groupLabelPatch(getOrderGroupPatch(o)),
+        statusLabelPatch(o.status),
+        sideLabelPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        o.qty || 0,
+        o.price ?? '',
+        o.amount || 0,
+        o.fee_amount || 0,
+        o.tax_amount || 0,
+        o.settlement_amount || 0,
+        o.comment || ''
+      ];
+    });
 }
 
 function pctTextPatch(value) {
@@ -6622,7 +6806,7 @@ function normalizeRiskWarningOnlyPatch() {
 const previousGetViolationsMeetingPatch = getViolations;
 getViolations = function getViolationsWarningOnlyPatched() {
   return previousGetViolationsMeetingPatch().map(v => {
-    if (['loss_stop', 'loss_warn', 'pos_loss'].includes(v?.type)) {
+    if (v?.action || ['loss_stop', 'loss_warn', 'pos_loss'].includes(v?.type)) {
       return { ...v, action: null, actionLabel: null };
     }
     return v;
@@ -6635,6 +6819,145 @@ updateAllMetrics = function updateAllMetricsMeetingPatched() {
   previousUpdateAllMetricsMeetingPatch();
   normalizeRiskWarningOnlyPatch();
 };
+
+const previousExportFullReportPatchOverride = exportFullReportPatch;
+exportFullReportPatch = function exportFullReportPatchOverride() {
+  const rows = [];
+  const periodLabel = typeof period !== 'undefined' && period?.start && period?.end
+    ? `${period.start.toLocaleDateString('zh-TW')} ~ ${period.end.toLocaleDateString('zh-TW')}`
+    : '未設定';
+
+  rows.push(['SimTrade 完整分析報告']);
+  rows.push(['匯出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push(['交易期間', periodLabel]);
+  rows.push(['初始資金', INITIAL]);
+  rows.push([]);
+
+  csvSectionPatch(rows, '一、績效摘要', [
+    '組別','NAV','現金','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率(%)','成交筆數','手續費總額','交易稅總額','股息總額','最大回撤(%)','夏普值','資金使用率(%)','凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '二、成交明細', [
+    '下單日期','下單時間','成交日期','成交時間','組別','買賣','商品代號','商品名稱','股數','成交價','委託價','成交金額','手續費','交易稅','交割金額','備註'
+  ], exportExecutedRowsPatch());
+
+  csvSectionPatch(rows, '三、已實現損益明細', [
+    '組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','股數','成本單價','成交價','成交金額','手續費','交易稅','交割金額','已實現損益'
+  ], realizedTradeRowsPatch());
+
+  csvSectionPatch(rows, '四、所有下單紀錄（未成交 / 委託）', [
+    '下單日期','下單時間','預計成交日','實際成交時間','組別','狀態','買賣','商品代號','商品名稱','股數','委託價','委託金額','手續費','交易稅','預估交割金額','原因/備註'
+  ], exportOpenOrderRowsPatch());
+
+  const positionRows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      positionRows.push([
+        groupLabelPatch(grp), symbolFullPatch(p.symbol), state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0, p.avgPrice || 0, price, marketValue, cost, unrealized,
+        cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+        nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+      ]);
+    }
+  }
+
+  csvSectionPatch(rows, '五、期末持股快照', [
+    '組別','商品代號','商品名稱','股數','平均成本','現價','市值','持股成本','未實現損益','未實現報酬率(%)','NAV占比(%)'
+  ], positionRows);
+
+  csvSectionPatch(rows, '六、風控摘要', [
+    '組別','NAV','最大回撤(%)','資金使用率(%)','持股成本','凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.maxDD.toFixed(2), m.utilizationPct, m.totalCost, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '七、除權息與人工調整', [
+    '日期','組別','商品代號','調整類型','現金金額','股數變動','備註'
+  ], (state.portfolioEvents || []).map(ev => [
+    ev.event_date || ev.date || '',
+    groupLabelPatch(ev.group || ev.grp),
+    symbolFullPatch(ev.symbol || ''),
+    ev.event_type || '',
+    ev.cash_amount ?? ev.amount ?? '',
+    ev.share_delta ?? ev.qty_delta ?? '',
+    ev.note || ev.comment || ''
+  ]));
+
+  csvSectionPatch(rows, '八、報價快照', [
+    '商品代號','商品名稱','報價','昨收/基準價','漲跌幅(%)','報價時間','報價有效'
+  ], Object.entries(state.securities || {}).map(([sym, s]) => [
+    symbolFullPatch(sym), s.name || '', s.price ?? '', s.base ?? '',
+    s.changeRate ?? '', s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '是' : '否'
+  ]));
+
+  const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_full_report_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('完整 CSV 匯出完成', 'success');
+};
+
+const previousExportSheetsPatchOverride = exportSheetsPatch;
+exportSheetsPatch = function exportSheetsPatchOverride() {
+  const sheets = previousExportSheetsPatchOverride();
+  sheets.trades = {
+    filename: 'SimTrade_成交明細',
+    title: '成交明細',
+    rows: [
+      ['下單日期','下單時間','成交日期','成交時間','組別','買賣','商品代號','商品名稱','股數','成交價','委託價','成交金額','手續費','交易稅','交割金額','備註'],
+      ...exportExecutedRowsPatch()
+    ]
+  };
+  sheets.realized = {
+    filename: 'SimTrade_已實現損益明細',
+    title: '已實現損益明細',
+    rows: [
+      ['組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','股數','成本單價','成交價','成交金額','手續費','交易稅','交割金額','已實現損益'],
+      ...realizedTradeRowsPatch()
+    ]
+  };
+  sheets.orders = {
+    filename: 'SimTrade_委託與未成交',
+    title: '委託與未成交紀錄',
+    rows: [
+      ['下單日期','下單時間','預計成交日','實際成交時間','組別','狀態','買賣','商品代號','商品名稱','股數','委託價','委託金額','手續費','交易稅','預估交割金額','原因/備註'],
+      ...exportOpenOrderRowsPatch()
+    ]
+  };
+  return sheets;
+};
+
+const previousEnsureCsvExportUiPatch = ensureCsvExportUI;
+ensureCsvExportUI = function ensureCsvExportUiPatched() {
+  previousEnsureCsvExportUiPatch();
+  const select = qs('export-sheet-select');
+  if (select && !select.querySelector('option[value="realized"]')) {
+    const opt = document.createElement('option');
+    opt.value = 'realized';
+    opt.textContent = '已實現損益明細';
+    const ordersOpt = select.querySelector('option[value="orders"]');
+    if (ordersOpt && ordersOpt.parentNode) ordersOpt.parentNode.insertBefore(opt, ordersOpt);
+    else select.appendChild(opt);
+  }
+};
+
+exportReport = exportFullReportPatch;
+exportRiskReport = exportFullReportPatch;
 
 const previousInitMeetingPatch = init;
 init = async function initMeetingPatched() {
@@ -6675,7 +6998,551 @@ updateMarketStatusBanner = function updateMarketStatusBannerPatched() {
   if (txtEl) txtEl.textContent = text;
 };
 
+groupLabelPatch = function groupLabelPatchClean(grp) {
+  return grp === 'etf' ? 'ETF組' : '個股組';
+};
+
+sideLabelPatch = function sideLabelPatchClean(side) {
+  return side === 'buy' ? '買入' : '賣出';
+};
+
+statusLabelPatch = function statusLabelPatchClean(status) {
+  if (status === 'executed') return '已成交';
+  if (status === 'pending' || status === 'approved') return '待成交';
+  if (status === 'rejected' || status === 'cancelled') return '已取消';
+  if (status === 'expired') return '已失效';
+  return status || '';
+};
+
+pctTextPatch = function pctTextPatchClean(value) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '—';
+  return (Number(value) * 100).toFixed(2) + '%';
+};
+
+exportOpenOrderRowsPatch = function exportAllOrderRowsPatch() {
+  return (state.orders || [])
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderSubmittedAtPatch(a)).date || '';
+      const at = splitDateTimePatch(orderSubmittedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderSubmittedAtPatch(b)).date || '';
+      const bt = splitDateTimePatch(orderSubmittedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        groupLabelPatch(getOrderGroupPatch(o)),
+        statusLabelPatch(o.status),
+        sideLabelPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        o.qty || 0,
+        o.price ?? '',
+        o.amount || 0,
+        o.fee_amount || 0,
+        o.tax_amount || 0,
+        o.settlement_amount || 0,
+        o.comment || ''
+      ];
+    });
+};
+
+exportFullReportPatch = function exportFullReportPatchOverrideClean() {
+  const rows = [];
+  const periodLabel = typeof period !== 'undefined' && period?.start && period?.end
+    ? `${period.start.toLocaleDateString('zh-TW')} ~ ${period.end.toLocaleDateString('zh-TW')}`
+    : '全期間';
+
+  rows.push(['SimTrade 完整分析報告']);
+  rows.push(['匯出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push(['統計期間', periodLabel]);
+  rows.push(['初始資金', INITIAL]);
+  rows.push([]);
+
+  csvSectionPatch(rows, '一、績效摘要', [
+    '組別','NAV','現金','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率(%)','成交筆數','手續費合計','交易稅合計','股息合計','最大回撤(%)','夏普值','資金使用率(%)','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '二、成交明細', [
+    '下單日期','下單時間','成交日期','成交時間','組別','方向','商品代號','商品名稱','數量(股/單位)','成交價','下單價','成交金額','手續費','交易稅','淨交割金額','備註'
+  ], exportExecutedRowsPatch());
+
+  csvSectionPatch(rows, '三、已實現損益明細', [
+    '組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','數量(股/單位)','平均成本','成交價','成交金額','手續費','交易稅','淨交割金額','已實現損益'
+  ], realizedTradeRowsPatch());
+
+  csvSectionPatch(rows, '四、所有下單紀錄', [
+    '下單日期','下單時間','成交日期','成交時間','組別','狀態','方向','商品代號','商品名稱','數量(股/單位)','下單價','委託金額','手續費','交易稅','淨交割金額','備註'
+  ], exportOpenOrderRowsPatch());
+
+  const positionRows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      positionRows.push([
+        groupLabelPatch(grp),
+        symbolFullPatch(p.symbol),
+        state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0,
+        p.avgPrice || 0,
+        price,
+        marketValue,
+        cost,
+        unrealized,
+        cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+        nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+      ]);
+    }
+  }
+
+  csvSectionPatch(rows, '五、期末持股快照', [
+    '組別','商品代號','商品名稱','持股數量','平均成本','現價','市值','持股成本','未實現損益','未實現報酬率(%)','NAV佔比(%)'
+  ], positionRows);
+
+  csvSectionPatch(rows, '六、風控摘要', [
+    '組別','NAV','最大回撤(%)','資金使用率(%)','持股成本','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.maxDD.toFixed(2), m.utilizationPct, m.totalCost, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '七、除權息與人工調整', [
+    '日期','組別','商品代號','事件類型','現金金額','股數變動','備註'
+  ], (state.portfolioEvents || []).map(ev => [
+    ev.event_date || ev.date || '',
+    groupLabelPatch(ev.group || ev.grp),
+    symbolFullPatch(ev.symbol || ''),
+    ev.event_type || '',
+    ev.cash_amount ?? ev.amount ?? '',
+    ev.share_delta ?? ev.qty_delta ?? '',
+    ev.note || ev.comment || ''
+  ]));
+
+  csvSectionPatch(rows, '八、報價快照', [
+    '商品代號','商品名稱','現價','昨收/基準價','漲跌幅(%)','報價時間','是否有有效報價'
+  ], Object.entries(state.securities || {}).map(([sym, s]) => [
+    symbolFullPatch(sym), s.name || '', s.price ?? '', s.base ?? '', s.changeRate ?? '',
+    s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '是' : '否'
+  ]));
+
+  const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('完整分析 CSV 已匯出', 'success');
+};
+
+exportSheetsPatch = function exportSheetsPatchOverrideClean() {
+  const sheets = {
+    summary: {
+      filename: 'SimTrade_績效摘要',
+      title: '績效摘要',
+      rows: [
+        ['組別','NAV','現金','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率(%)','成交筆數','手續費合計','交易稅合計','股息合計','最大回撤(%)','夏普值','資金使用率(%)','是否凍結'],
+        ...['etf', 'stock'].map(grp => {
+          const m = groupMetricsPatch(grp);
+          return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+        })
+      ]
+    },
+    trades: {
+      filename: 'SimTrade_成交明細',
+      title: '成交明細',
+      rows: [
+        ['下單日期','下單時間','成交日期','成交時間','組別','方向','商品代號','商品名稱','數量(股/單位)','成交價','下單價','成交金額','手續費','交易稅','淨交割金額','備註'],
+        ...exportExecutedRowsPatch()
+      ]
+    },
+    realized: {
+      filename: 'SimTrade_已實現損益明細',
+      title: '已實現損益明細',
+      rows: [
+        ['組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','數量(股/單位)','平均成本','成交價','成交金額','手續費','交易稅','淨交割金額','已實現損益'],
+        ...realizedTradeRowsPatch()
+      ]
+    },
+    orders: {
+      filename: 'SimTrade_所有下單紀錄',
+      title: '所有下單紀錄',
+      rows: [
+        ['下單日期','下單時間','成交日期','成交時間','組別','狀態','方向','商品代號','商品名稱','數量(股/單位)','下單價','委託金額','手續費','交易稅','淨交割金額','備註'],
+        ...exportOpenOrderRowsPatch()
+      ]
+    },
+    positions: {
+      filename: 'SimTrade_期末持股快照',
+      title: '期末持股快照',
+      rows: [
+        ['組別','商品代號','商品名稱','持股數量','平均成本','現價','市值','持股成本','未實現損益','未實現報酬率(%)','NAV佔比(%)']
+      ]
+    }
+  };
+
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      sheets.positions.rows.push([
+        groupLabelPatch(grp), symbolFullPatch(p.symbol), state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0, p.avgPrice || 0, price, marketValue, cost, unrealized,
+        cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+        nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+      ]);
+    }
+  }
+
+  return sheets;
+};
+
+ensureCsvExportUI = function ensureCsvExportUiPatchedClean() {
+  const select = qs('export-sheet-select');
+  if (!select) return;
+
+  const ensureOption = (value, label) => {
+    let opt = select.querySelector(`option[value="${value}"]`);
+    if (!opt) {
+      opt = document.createElement('option');
+      opt.value = value;
+      select.appendChild(opt);
+    }
+    opt.textContent = label;
+  };
+
+  ensureOption('summary', '績效摘要');
+  ensureOption('trades', '成交明細');
+  ensureOption('realized', '已實現損益明細');
+  ensureOption('orders', '所有下單紀錄');
+  ensureOption('positions', '期末持股快照');
+};
+
+exportReport = exportFullReportPatch;
+exportRiskReport = exportFullReportPatch;
+
+const previousInitMeetingPatchClean = init;
+init = async function initMeetingPatchedClean() {
+  await previousInitMeetingPatchClean();
+  normalizeRiskWarningOnlyPatch();
+  ensureCsvExportUI();
+};
+
+getTWNTime = function getTWNTimePatched() {
+  const text = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Taipei' }).replace(' ', 'T');
+  return new Date(text);
+};
+
+updateMarketStatusBanner = function updateMarketStatusBannerPatchedClean() {
+  const clockEl = qs('market-clock');
+  const txtEl = qs('market-status-txt');
+
+  if (isTestMarketOpenEnabledPatch()) {
+    if (clockEl) clockEl.className = 'rule-clock open-dot';
+    if (txtEl) txtEl.textContent = '測試模式';
+    return;
+  }
+
+  const twn = getTWNTime();
+  const mins = twn.getHours() * 60 + twn.getMinutes();
+  const day = twn.getDay();
+  const isWeekend = day === 0 || day === 6;
+
+  let text = '';
+  let open = false;
+
+  if (isWeekend) {
+    text = '週末休市';
+  } else if (mins < 9 * 60) {
+    text = '盤前（09:00 前）';
+  } else if (mins < 13 * 60 + 30) {
+    text = '交易中（13:30 前）';
+    open = true;
+  } else {
+    text = '已收盤（13:30 後）';
+  }
+
+  if (clockEl) clockEl.className = 'rule-clock ' + (open ? 'open-dot' : 'close-dot');
+  if (txtEl) txtEl.textContent = text;
+};
+
 updateMarketStatusBanner();
+(() => {
+  const TXT = {
+    etf: '\u0045\u0054\u0046\u7d44',
+    stock: '\u500b\u80a1\u7d44',
+    buy: '\u8cb7\u5165',
+    sell: '\u8ce3\u51fa',
+    executed: '\u5df2\u6210\u4ea4',
+    pending: '\u5f85\u6210\u4ea4',
+    cancelled: '\u5df2\u53d6\u6d88',
+    expired: '\u5df2\u5931\u6548',
+    dash: '\u2014',
+    fullReport: 'SimTrade \u5b8c\u6574\u5206\u6790\u5831\u544a',
+    exportTime: '\u532f\u51fa\u6642\u9593',
+    period: '\u7d71\u8a08\u671f\u9593',
+    initialCash: '\u521d\u59cb\u8cc7\u91d1',
+    allPeriod: '\u5168\u671f\u9593',
+    csvDone: '\u5b8c\u6574\u5206\u6790 CSV \u5df2\u532f\u51fa',
+    marketTest: '\u6e2c\u8a66\u6a21\u5f0f',
+    weekend: '\u9031\u672b\u4f11\u5e02',
+    preopen: '\u76e4\u524d\uff0809:00 \u524d\uff09',
+    open: '\u4ea4\u6613\u4e2d\uff0813:30 \u524d\uff09',
+    closed: '\u5df2\u6536\u76e4\uff0813:30 \u5f8c\uff09'
+  };
+
+  groupLabelPatch = function(grp) {
+    return grp === 'etf' ? TXT.etf : TXT.stock;
+  };
+
+  sideLabelPatch = function(side) {
+    return side === 'buy' ? TXT.buy : TXT.sell;
+  };
+
+  statusLabelPatch = function(status) {
+    if (status === 'executed') return TXT.executed;
+    if (status === 'pending' || status === 'approved') return TXT.pending;
+    if (status === 'rejected' || status === 'cancelled') return TXT.cancelled;
+    if (status === 'expired') return TXT.expired;
+    return status || '';
+  };
+
+  pctTextPatch = function(value) {
+    if (value === '' || value == null || !Number.isFinite(Number(value))) return TXT.dash;
+    return (Number(value) * 100).toFixed(2) + '%';
+  };
+
+  exportOpenOrderRowsPatch = function() {
+    return (state.orders || [])
+      .sort((a, b) => {
+        const ad = splitDateTimePatch(orderSubmittedAtPatch(a)).date || '';
+        const at = splitDateTimePatch(orderSubmittedAtPatch(a)).time || '';
+        const bd = splitDateTimePatch(orderSubmittedAtPatch(b)).date || '';
+        const bt = splitDateTimePatch(orderSubmittedAtPatch(b)).time || '';
+        return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+      })
+      .map(o => {
+        const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+        const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+        return [
+          submitted.date,
+          submitted.time,
+          executedAt.date || o.settlement_date || '',
+          executedAt.time,
+          groupLabelPatch(getOrderGroupPatch(o)),
+          statusLabelPatch(o.status),
+          sideLabelPatch(o.side),
+          symbolFullPatch(o.symbol),
+          o.name || '',
+          o.qty || 0,
+          o.price ?? '',
+          o.amount || 0,
+          o.fee_amount || 0,
+          o.tax_amount || 0,
+          o.settlement_amount || 0,
+          o.comment || ''
+        ];
+      });
+  };
+
+  exportFullReportPatch = function() {
+    const rows = [];
+    const periodLabel = typeof period !== 'undefined' && period?.start && period?.end
+      ? `${period.start.toLocaleDateString('zh-TW')} ~ ${period.end.toLocaleDateString('zh-TW')}`
+      : TXT.allPeriod;
+
+    rows.push([TXT.fullReport]);
+    rows.push([TXT.exportTime, new Date().toLocaleString('zh-TW')]);
+    rows.push([TXT.period, periodLabel]);
+    rows.push([TXT.initialCash, INITIAL]);
+    rows.push([]);
+
+    csvSectionPatch(rows, '\u4e00\u3001\u7e3e\u6548\u6458\u8981', [
+      '\u7d44\u5225','NAV','\u73fe\u91d1','\u6301\u80a1\u5e02\u503c','\u6301\u80a1\u6210\u672c','\u5df2\u5be6\u73fe\u640d\u76ca','\u672a\u5be6\u73fe\u640d\u76ca','\u7e3d\u640d\u76ca','\u5831\u916c\u7387(%)','\u6210\u4ea4\u7b46\u6578','\u624b\u7e8c\u8cbb\u5408\u8a08','\u4ea4\u6613\u7a05\u5408\u8a08','\u80a1\u606f\u5408\u8a08','\u6700\u5927\u56de\u64a4(%)','\u590f\u666e\u503c','\u8cc7\u91d1\u4f7f\u7528\u7387(%)','\u662f\u5426\u51cd\u7d50'
+    ], ['etf', 'stock'].map(grp => {
+      const m = groupMetricsPatch(grp);
+      return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+    }));
+
+    csvSectionPatch(rows, '\u4e8c\u3001\u6210\u4ea4\u660e\u7d30', [
+      '\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u7d44\u5225','\u65b9\u5411','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u6210\u4ea4\u50f9','\u4e0b\u55ae\u50f9','\u6210\u4ea4\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5099\u8a3b'
+    ], exportExecutedRowsPatch());
+
+    csvSectionPatch(rows, '\u4e09\u3001\u5df2\u5be6\u73fe\u640d\u76ca\u660e\u7d30', [
+      '\u7d44\u5225','\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u65b9\u5411','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u5e73\u5747\u6210\u672c','\u6210\u4ea4\u50f9','\u6210\u4ea4\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5df2\u5be6\u73fe\u640d\u76ca'
+    ], realizedTradeRowsPatch());
+
+    csvSectionPatch(rows, '\u56db\u3001\u6240\u6709\u4e0b\u55ae\u7d00\u9304', [
+      '\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u7d44\u5225','\u72c0\u614b','\u65b9\u5411','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u4e0b\u55ae\u50f9','\u59d4\u8a17\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5099\u8a3b'
+    ], exportOpenOrderRowsPatch());
+
+    const positionRows = [];
+    for (const grp of ['etf', 'stock']) {
+      const g = state.groups?.[grp] || {};
+      const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+      for (const p of g.positions || []) {
+        const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+        const marketValue = price * Number(p.qty || 0);
+        const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+        const unrealized = marketValue - cost;
+        positionRows.push([
+          groupLabelPatch(grp), symbolFullPatch(p.symbol), state.securities?.[p.symbol]?.name || p.name || '',
+          p.qty || 0, p.avgPrice || 0, price, marketValue, cost, unrealized,
+          cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+          nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+        ]);
+      }
+    }
+
+    csvSectionPatch(rows, '\u4e94\u3001\u671f\u672b\u6301\u80a1\u5feb\u7167', [
+      '\u7d44\u5225','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u6301\u80a1\u6578\u91cf','\u5e73\u5747\u6210\u672c','\u73fe\u50f9','\u5e02\u503c','\u6301\u80a1\u6210\u672c','\u672a\u5be6\u73fe\u640d\u76ca','\u672a\u5be6\u73fe\u5831\u916c\u7387(%)','NAV\u4f54\u6bd4(%)'
+    ], positionRows);
+
+    csvSectionPatch(rows, '\u516d\u3001\u98a8\u63a7\u6458\u8981', [
+      '\u7d44\u5225','NAV','\u6700\u5927\u56de\u64a4(%)','\u8cc7\u91d1\u4f7f\u7528\u7387(%)','\u6301\u80a1\u6210\u672c','\u662f\u5426\u51cd\u7d50'
+    ], ['etf', 'stock'].map(grp => {
+      const m = groupMetricsPatch(grp);
+      return [m.groupName, m.nav, m.maxDD.toFixed(2), m.utilizationPct, m.totalCost, m.frozen];
+    }));
+
+    csvSectionPatch(rows, '\u4e03\u3001\u9664\u6b0a\u606f\u8207\u4eba\u5de5\u8abf\u6574', [
+      '\u65e5\u671f','\u7d44\u5225','\u5546\u54c1\u4ee3\u865f','\u4e8b\u4ef6\u985e\u578b','\u73fe\u91d1\u91d1\u984d','\u80a1\u6578\u8b8a\u52d5','\u5099\u8a3b'
+    ], (state.portfolioEvents || []).map(ev => [
+      ev.event_date || ev.date || '', groupLabelPatch(ev.group || ev.grp), symbolFullPatch(ev.symbol || ''),
+      ev.event_type || '', ev.cash_amount ?? ev.amount ?? '', ev.share_delta ?? ev.qty_delta ?? '', ev.note || ev.comment || ''
+    ]));
+
+    csvSectionPatch(rows, '\u516b\u3001\u5831\u50f9\u5feb\u7167', [
+      '\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u73fe\u50f9','\u6628\u6536/\u57fa\u6e96\u50f9','\u6f32\u8dcc\u5e45(%)','\u5831\u50f9\u6642\u9593','\u662f\u5426\u6709\u6709\u6548\u5831\u50f9'
+    ], Object.entries(state.securities || {}).map(([sym, s]) => [
+      symbolFullPatch(sym), s.name || '', s.price ?? '', s.base ?? '', s.changeRate ?? '',
+      s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+      isValidPricePatch(s.price) ? '\u662f' : '\u5426'
+    ]));
+
+    const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'SimTrade_\u5b8c\u6574\u5206\u6790\u5831\u544a_' + new Date().toISOString().slice(0, 10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(TXT.csvDone, 'success');
+  };
+
+  exportSheetsPatch = function() {
+    const sheets = {
+      summary: {
+        filename: 'SimTrade_\u7e3e\u6548\u6458\u8981',
+        title: '\u7e3e\u6548\u6458\u8981',
+        rows: [
+          ['\u7d44\u5225','NAV','\u73fe\u91d1','\u6301\u80a1\u5e02\u503c','\u6301\u80a1\u6210\u672c','\u5df2\u5be6\u73fe\u640d\u76ca','\u672a\u5be6\u73fe\u640d\u76ca','\u7e3d\u640d\u76ca','\u5831\u916c\u7387(%)','\u6210\u4ea4\u7b46\u6578','\u624b\u7e8c\u8cbb\u5408\u8a08','\u4ea4\u6613\u7a05\u5408\u8a08','\u80a1\u606f\u5408\u8a08','\u6700\u5927\u56de\u64a4(%)','\u590f\u666e\u503c','\u8cc7\u91d1\u4f7f\u7528\u7387(%)','\u662f\u5426\u51cd\u7d50'],
+          ...['etf', 'stock'].map(grp => {
+            const m = groupMetricsPatch(grp);
+            return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+          })
+        ]
+      },
+      trades: {
+        filename: 'SimTrade_\u6210\u4ea4\u660e\u7d30',
+        title: '\u6210\u4ea4\u660e\u7d30',
+        rows: [
+          ['\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u7d44\u5225','\u65b9\u5411','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u6210\u4ea4\u50f9','\u4e0b\u55ae\u50f9','\u6210\u4ea4\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5099\u8a3b'],
+          ...exportExecutedRowsPatch()
+        ]
+      },
+      realized: {
+        filename: 'SimTrade_\u5df2\u5be6\u73fe\u640d\u76ca\u660e\u7d30',
+        title: '\u5df2\u5be6\u73fe\u640d\u76ca\u660e\u7d30',
+        rows: [
+          ['\u7d44\u5225','\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u65b9\u5411','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u5e73\u5747\u6210\u672c','\u6210\u4ea4\u50f9','\u6210\u4ea4\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5df2\u5be6\u73fe\u640d\u76ca'],
+          ...realizedTradeRowsPatch()
+        ]
+      },
+      orders: {
+        filename: 'SimTrade_\u6240\u6709\u4e0b\u55ae\u7d00\u9304',
+        title: '\u6240\u6709\u4e0b\u55ae\u7d00\u9304',
+        rows: [
+          ['\u4e0b\u55ae\u65e5\u671f','\u4e0b\u55ae\u6642\u9593','\u6210\u4ea4\u65e5\u671f','\u6210\u4ea4\u6642\u9593','\u7d44\u5225','\u72c0\u614b','\u65b9\u5411','\u5546\u54c1\u4ee3\u865f','\u5546\u54c1\u540d\u7a31','\u6578\u91cf(\u80a1/\u55ae\u4f4d)','\u4e0b\u55ae\u50f9','\u59d4\u8a17\u91d1\u984d','\u624b\u7e8c\u8cbb','\u4ea4\u6613\u7a05','\u6de8\u4ea4\u5272\u91d1\u984d','\u5099\u8a3b'],
+          ...exportOpenOrderRowsPatch()
+        ]
+      }
+    };
+    return sheets;
+  };
+
+  ensureCsvExportUI = function() {
+    const select = qs('export-sheet-select');
+    if (!select) return;
+    const options = [
+      ['summary', '\u7e3e\u6548\u6458\u8981'],
+      ['trades', '\u6210\u4ea4\u660e\u7d30'],
+      ['realized', '\u5df2\u5be6\u73fe\u640d\u76ca\u660e\u7d30'],
+      ['orders', '\u6240\u6709\u4e0b\u55ae\u7d00\u9304']
+    ];
+    options.forEach(([value, label]) => {
+      let opt = select.querySelector(`option[value="${value}"]`);
+      if (!opt) {
+        opt = document.createElement('option');
+        opt.value = value;
+        select.appendChild(opt);
+      }
+      opt.textContent = label;
+    });
+  };
+
+  exportReport = exportFullReportPatch;
+  exportRiskReport = exportFullReportPatch;
+
+  getTWNTime = function() {
+    const text = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Taipei' }).replace(' ', 'T');
+    return new Date(text);
+  };
+
+  updateMarketStatusBanner = function() {
+    const clockEl = qs('market-clock');
+    const txtEl = qs('market-status-txt');
+    if (isTestMarketOpenEnabledPatch()) {
+      if (clockEl) clockEl.className = 'rule-clock open-dot';
+      if (txtEl) txtEl.textContent = TXT.marketTest;
+      return;
+    }
+    const twn = getTWNTime();
+    const mins = twn.getHours() * 60 + twn.getMinutes();
+    const isWeekend = twn.getDay() === 0 || twn.getDay() === 6;
+    let text = '';
+    let open = false;
+    if (isWeekend) text = TXT.weekend;
+    else if (mins < 9 * 60) text = TXT.preopen;
+    else if (mins < 13 * 60 + 30) { text = TXT.open; open = true; }
+    else text = TXT.closed;
+    if (clockEl) clockEl.className = 'rule-clock ' + (open ? 'open-dot' : 'close-dot');
+    if (txtEl) txtEl.textContent = text;
+  };
+
+  updateMarketStatusBanner();
+  ensureCsvExportUI();
+})();
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
 }, 1000);
