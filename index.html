@@ -7614,6 +7614,67 @@ resetAll = async function resetAllPatched() {
   }
 };
 
+(() => {
+  const originalSharedSettingsPayloadForPeriod = sharedSettingsPayloadPatch;
+  sharedSettingsPayloadPatch = function sharedSettingsPayloadWithPeriodPatch() {
+    const payload = originalSharedSettingsPayloadForPeriod();
+    payload.period = {
+      start: period.start ? period.start.toISOString().slice(0, 10) : null,
+      end: period.end ? period.end.toISOString().slice(0, 10) : null
+    };
+    return payload;
+  };
+
+  const originalLoadSharedSettingsForPeriod = loadSharedSettingsPatch;
+  loadSharedSettingsPatch = async function loadSharedSettingsWithPeriodPatch() {
+    await originalLoadSharedSettingsForPeriod();
+    try {
+      const { data, error } = await db
+        .from('app_settings')
+        .select('key,value,updated_at')
+        .eq('key', SHARED_SETTINGS_KEY_PATCH)
+        .maybeSingle();
+      if (error) throw error;
+
+      const p = data?.value?.period || {};
+      if (p.start && p.end) {
+        period.start = new Date(String(p.start) + 'T00:00:00');
+        period.end = new Date(String(p.end) + 'T23:59:59');
+        if (qs('period-start')) qs('period-start').value = String(p.start);
+        if (qs('period-end')) qs('period-end').value = String(p.end);
+      } else {
+        period.start = null;
+        period.end = null;
+        if (qs('period-start')) qs('period-start').value = '';
+        if (qs('period-end')) qs('period-end').value = '';
+      }
+      updatePeriodUI();
+      renderNavChart();
+    } catch (e) {
+      console.warn('loadSharedSettings period failed:', e);
+    }
+  };
+
+  const originalSetPeriodSharedPatch = setPeriod;
+  setPeriod = async function setPeriodSharedPatched() {
+    originalSetPeriodSharedPatch();
+    if (period.start && period.end) {
+      await saveSharedSettingsPatch();
+    }
+  };
+
+  clearPeriod = async function clearPeriodSharedPatched() {
+    period.start = null;
+    period.end = null;
+    if (qs('period-start')) qs('period-start').value = '';
+    if (qs('period-end')) qs('period-end').value = '';
+    updatePeriodUI();
+    renderNavChart();
+    await saveSharedSettingsPatch();
+    toast('已清除共用交易期間', 'info');
+  };
+})();
+
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
 }, 1000);
