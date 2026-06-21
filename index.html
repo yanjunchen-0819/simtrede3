@@ -6622,7 +6622,8 @@ confirmAddTicker = function confirmAddTickerUnhidePatched() {
 
 const originalConfirmAddSecurityHidePatch = confirmAddSecurity;
 confirmAddSecurity = async function confirmAddSecurityUnhidePatched() {
-  const symbol = normalizeSymbolInput(qs('new-sec-symbol')?.value || '');
+  const market = qs('new-sec-market')?.value || 'TW';
+  const symbol = normalizeSymbolWithMarketPatch(qs('new-sec-symbol')?.value || '', market);
   const grp = qs('new-sec-grp')?.value || inferGroupByRawSymbol(symbol);
   unhideTickerPatch(grp, symbol);
   return originalConfirmAddSecurityHidePatch();
