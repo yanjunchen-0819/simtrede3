@@ -3330,7 +3330,15 @@ function selectFromChart() {
 // ========== TRADING PERIOD ==========
 const period = { start: null, end: null };
 
-function todayStr() { return new Date().toISOString().slice(0, 10); }
+function formatLocalDateKey(d) {
+  if (!d) return '';
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function todayStr() { return formatLocalDateKey(new Date()); }
 
 function onPeriodChange() {
   const s = qs('period-start').value;
@@ -7619,8 +7627,8 @@ resetAll = async function resetAllPatched() {
   sharedSettingsPayloadPatch = function sharedSettingsPayloadWithPeriodPatch() {
     const payload = originalSharedSettingsPayloadForPeriod();
     payload.period = {
-      start: period.start ? period.start.toISOString().slice(0, 10) : null,
-      end: period.end ? period.end.toISOString().slice(0, 10) : null
+      start: period.start ? formatLocalDateKey(period.start) : null,
+      end: period.end ? formatLocalDateKey(period.end) : null
     };
     return payload;
   };
@@ -7699,8 +7707,8 @@ resetAll = async function resetAllPatched() {
         stk: Number(state.limits?.stk || 10)
       },
       period: {
-        start: period.start ? period.start.toISOString().slice(0, 10) : null,
-        end: period.end ? period.end.toISOString().slice(0, 10) : null
+        start: period.start ? formatLocalDateKey(period.start) : null,
+        end: period.end ? formatLocalDateKey(period.end) : null
       }
     };
 
