@@ -7675,6 +7675,50 @@ resetAll = async function resetAllPatched() {
   };
 })();
 
+(() => {
+  saveSharedSettingsPatch = async function saveSharedSettingsWithPeriodFinalPatch() {
+    if (!sharedSettingsLoadedPatch) return;
+    if (typeof ensureHiddenTickerStatePatch === 'function') {
+      ensureHiddenTickerStatePatch();
+    }
+
+    const hiddenEtf = new Set(state.hiddenTickers?.etf || []);
+    const hiddenStock = new Set(state.hiddenTickers?.stock || []);
+
+    const payload = {
+      customTickers: {
+        etf: Array.from(new Set((state.customTickers?.etf || []).filter(sym => !hiddenEtf.has(sym)))),
+        stock: Array.from(new Set((state.customTickers?.stock || []).filter(sym => !hiddenStock.has(sym))))
+      },
+      hiddenTickers: {
+        etf: Array.from(hiddenEtf),
+        stock: Array.from(hiddenStock)
+      },
+      limits: {
+        etf: Number(state.limits?.etf || 10),
+        stk: Number(state.limits?.stk || 10)
+      },
+      period: {
+        start: period.start ? period.start.toISOString().slice(0, 10) : null,
+        end: period.end ? period.end.toISOString().slice(0, 10) : null
+      }
+    };
+
+    const { error } = await db
+      .from('app_settings')
+      .upsert([{
+        key: SHARED_SETTINGS_KEY_PATCH,
+        value: payload,
+        updated_at: new Date().toISOString()
+      }], { onConflict: 'key' });
+
+    if (error) {
+      console.warn('saveSharedSettingsWithPeriodFinalPatch failed:', error, payload);
+      toast('共用設定儲存失敗', 'warn');
+    }
+  };
+})();
+
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
 }, 1000);
