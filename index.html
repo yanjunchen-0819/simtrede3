@@ -6407,15 +6407,16 @@ updateLimits = function updateLimitsSharedPatched() {
 
 const originalInitForSharedPatch = init;
 init = async function initSharedSettingsPatched() {
-  const today = new Date().toISOString().slice(0,10);
-  const next7 = new Date(Date.now() + 7*86400000).toISOString().slice(0,10);
-  if (qs('period-start')) qs('period-start').value = today;
-  if (qs('period-end'))   qs('period-end').value   = next7;
-
   setTestMarketOpenEnabledPatch(false);
   updateMarketStatusBanner();
   loadTickerPrefs();
   await loadSharedSettingsPatch();
+  if (!period.start || !period.end) {
+    const today = todayStr();
+    const next7 = formatLocalDateKey(new Date(Date.now() + 7 * 86400000));
+    if (qs('period-start') && !qs('period-start').value) qs('period-start').value = today;
+    if (qs('period-end') && !qs('period-end').value) qs('period-end').value = next7;
+  }
   initDebugPanel();
   refreshTestMarketOpenUiPatch();
   setupRealtime();
