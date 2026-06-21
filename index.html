@@ -110,6 +110,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:16
 .metric-val.warn{color:var(--amber)}
 .metric-val.neutral,.metric-val.flat{color:var(--text)}
 .metric-sub{font-size:12px;color:var(--text3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 /* ── Three Column Grid for Risk Panel ── */
 .three-col-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
 .three-col-grid .metric{padding:10px 6px;text-align:center}
@@ -2793,7 +2794,13 @@ function updateLimits() {
 
 async function resetAll() {
   if (!confirm('確定重置所有資料？Supabase 上的訂單紀錄也會一併刪除，此操作無法復原。')) return;
-  await clearOrdersFromDB();
+  try {
+    await clearOrdersFromDB();
+  } catch (error) {
+    console.error('resetAll failed', error);
+    toast('重置失敗：資料庫未清除成功，請檢查 Supabase 權限或改用 SQL 重置', 'danger');
+    return;
+  }
   toast('沙盒已重置，重新開始', 'info');
   updateAllMetrics(); renderNavChart(); renderHistory();
 }
@@ -3741,7 +3748,10 @@ async function runAutoCorporateActions() {
 }
 
 async function clearOrdersFromDB() {
-  await db.from('orders').delete().neq('id', '___none___');
+  const { error: ordersError } = await db.from('orders').delete().neq('id', '___none___');
+  if (ordersError) throw ordersError;
+  const { error: eventsError } = await db.from('portfolio_events').delete().neq('id', '___none___');
+  if (eventsError) throw eventsError;
   state.groups.etf   = mkGroup('ETF 組');
   state.groups.stock = mkGroup('個股組');
   state.orders = [];
@@ -7575,6 +7585,35 @@ updateMarketStatusBanner();
     state.orders = state.orders.map(o => normalizeOrderFinancials(o));
   }
 })();
+
+clearOrdersFromDB = async function clearOrdersFromDBPatched() {
+  const { error: ordersError } = await db.from('orders').delete().neq('id', '___none___');
+  if (ordersError) throw ordersError;
+
+  const { error: eventsError } = await db.from('portfolio_events').delete().neq('id', '___none___');
+  if (eventsError) throw eventsError;
+
+  state.groups.etf = mkGroup('ETF 組');
+  state.groups.stock = mkGroup('個股組');
+  state.orders = [];
+  state.portfolioEvents = [];
+};
+
+resetAll = async function resetAllPatched() {
+  if (!confirm('確定重置所有資料？這會刪除 Supabase 上的訂單與人工調整紀錄，且無法復原。')) return;
+  try {
+    await clearOrdersFromDB();
+    updateAllMetrics();
+    renderNavChart();
+    renderHistory();
+    renderPendingList();
+    toast('已重置競賽資料，重新開始', 'info');
+  } catch (error) {
+    console.error('resetAll failed', error);
+    toast('重置失敗：資料庫未清除成功，請檢查 Supabase 權限，或先用 SQL 手動重置', 'danger');
+  }
+};
+
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
 }, 1000);
