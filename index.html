@@ -763,7 +763,8 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
               <p style="font-size:13px;color:var(--text);margin-bottom:14px;line-height:1.5">
                 匯出包含兩組指標（夏普值、最大回撤、資金使用率）及所有下單詳細紀錄的 CSV 報表。
               </p>
-              <button class="btn btn-full btn-primary" onclick="exportRiskReport()">📄 匯出中後台報告 CSV</button>
+              <button class="btn btn-full btn-primary" style="margin-bottom:8px" onclick="exportRiskReport()">📄 匯出完整分析報告 CSV</button>
+              <button class="btn btn-full btn-etf" onclick="exportExcelWorkbookPatch()">📊 匯出 Excel 活頁簿</button>
             </div>
           </div>
           </div>
@@ -9051,6 +9052,176 @@ renderNavChart = function renderNavChartFinalPatch() {
       }
     }
   });
+};
+
+function previousTradingDateKeyFinalPatch(baseDate) {
+  const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() - 1);
+  }
+  return navLocalDateKeyFinalPatch(d);
+}
+
+function syncPeriodInputsFromStateFinalPatch() {
+  const startEl = qs('period-start');
+  const endEl = qs('period-end');
+  if (startEl) startEl.value = period.start ? formatLocalDateKey(period.start) : '';
+  if (endEl) endEl.value = period.end ? formatLocalDateKey(period.end) : '';
+}
+
+async function syncPeriodFromSharedSettingsFinalPatch() {
+  try {
+    const { data, error } = await db
+      .from('app_settings')
+      .select('key,value')
+      .eq('key', SHARED_SETTINGS_KEY_PATCH)
+      .maybeSingle();
+    if (error) throw error;
+    const p = data?.value?.period || {};
+    if (p.start && p.end) {
+      period.start = new Date(String(p.start) + 'T00:00:00');
+      period.end = new Date(String(p.end) + 'T23:59:59');
+    } else {
+      period.start = null;
+      period.end = null;
+    }
+    syncPeriodInputsFromStateFinalPatch();
+  } catch (err) {
+    console.warn('syncPeriodFromSharedSettingsFinalPatch failed:', err);
+  }
+}
+
+deriveNavTimelineKeysFinalPatch = function deriveNavTimelineKeysFinalPatchOverride() {
+  if (typeof period !== 'undefined' && period?.start) {
+    const startKey = navLocalDateKeyFinalPatch(period.start);
+    const todayTwn = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+    let endKey = previousTradingDateKeyFinalPatch(todayTwn);
+    if (period?.end) {
+      const periodEndKey = navLocalDateKeyFinalPatch(period.end);
+      if (periodEndKey < endKey) endKey = periodEndKey;
+    }
+    if (!startKey || !endKey || endKey < startKey) return [];
+    return buildNavDateKeyRangeFinalPatch(startKey, endKey);
+  }
+
+  const allKeys = [];
+  for (const grp of ['etf', 'stock']) {
+    const raw = state.groups?.[grp]?.navHistory || [];
+    const normalized = typeof normalizeNavHistoryPoints === 'function'
+      ? normalizeNavHistoryPoints(raw)
+      : raw;
+    for (const p of normalized) {
+      const key = p?.dayKey || (p?.t ? navLocalDateKeyFinalPatch(Number(p.t)) : '');
+      if (key && isWeekdayNavDateKeyFinalPatch(key)) allKeys.push(key);
+    }
+  }
+  const sorted = [...new Set(allKeys)].sort();
+  return sorted;
+};
+
+updatePeriodUI = function updatePeriodUIFinalPatch() {
+  const dot = qs('period-dot');
+  const label = qs('period-status-label');
+  const sub = qs('period-status-sub');
+  const cdEl = qs('period-countdown');
+  const expArea = qs('export-area');
+  const expHint = qs('export-hint');
+
+  if (!period.start || !period.end) {
+    if (dot) dot.className = 'period-dot not-set';
+    if (label) label.textContent = '尚未設定交易期間';
+    if (sub) sub.textContent = '請選擇開始與結束日期';
+    if (cdEl) cdEl.textContent = '';
+    if (expArea) expArea.style.display = 'none';
+    syncPeriodInputsFromStateFinalPatch();
+    return;
+  }
+
+  const now = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+  const fmtDate = d => d.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' });
+
+  if (now < period.start) {
+    if (dot) dot.className = 'period-dot not-set';
+    if (label) label.textContent = '交易期間尚未開始';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      const daysLeft = Math.ceil((period.start - now) / 86400000);
+      cdEl.textContent = `剩 ${daysLeft} 天`;
+      cdEl.style.color = 'var(--text3)';
+    }
+    if (expArea) expArea.style.display = 'none';
+  } else if (now <= period.end) {
+    if (dot) dot.className = 'period-dot active';
+    if (label) label.textContent = '交易期間進行中';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      const msLeft = period.end - now;
+      const dLeft = Math.floor(msLeft / 86400000);
+      const hLeft = Math.floor((msLeft % 86400000) / 3600000);
+      cdEl.textContent = dLeft > 0 ? `剩 ${dLeft} 天` : `剩 ${hLeft} 小時`;
+      cdEl.style.color = dLeft <= 1 ? 'var(--red)' : 'var(--teal)';
+    }
+    if (expArea) expArea.style.display = 'block';
+    if (expHint) expHint.textContent = '匯出內容會以目前競賽期間整理。';
+  } else {
+    if (dot) dot.className = 'period-dot ended';
+    if (label) label.textContent = '交易期間已結束';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      cdEl.textContent = '已結束';
+      cdEl.style.color = 'var(--amber)';
+    }
+    if (expArea) expArea.style.display = 'block';
+    if (expHint) expHint.textContent = '競賽期間已結束，可匯出完整報表。';
+  }
+
+  syncPeriodInputsFromStateFinalPatch();
+};
+
+setPeriod = async function setPeriodFinalPatch() {
+  const s = qs('period-start')?.value || '';
+  const e = qs('period-end')?.value || '';
+  if (!s || !e) {
+    toast('請先選擇開始與結束日期', 'warn');
+    return;
+  }
+  if (e < s) {
+    toast('結束日期不能早於開始日期', 'warn');
+    return;
+  }
+  period.start = new Date(`${s}T00:00:00`);
+  period.end = new Date(`${e}T23:59:59`);
+  syncPeriodInputsFromStateFinalPatch();
+  updatePeriodUI();
+  renderNavChart();
+  await saveSharedSettingsPatch();
+  toast('交易期間已設定', 'success');
+};
+
+clearPeriod = async function clearPeriodFinalPatch() {
+  period.start = null;
+  period.end = null;
+  syncPeriodInputsFromStateFinalPatch();
+  updatePeriodUI();
+  renderNavChart();
+  await saveSharedSettingsPatch();
+  toast('交易期間已清除', 'info');
+};
+
+const previousLoadSharedSettingsPeriodFinalPatch = loadSharedSettingsPatch;
+loadSharedSettingsPatch = async function loadSharedSettingsPeriodFinalPatch() {
+  await previousLoadSharedSettingsPeriodFinalPatch();
+  await syncPeriodFromSharedSettingsFinalPatch();
+  updatePeriodUI();
+  renderNavChart();
+};
+
+const previousInitPeriodFinalPatch = init;
+init = async function initPeriodNavFinalPatch() {
+  await previousInitPeriodFinalPatch();
+  await syncPeriodFromSharedSettingsFinalPatch();
+  updatePeriodUI();
+  renderNavChart();
 };
 
 // ===== SimTrade minimal patch END =====
