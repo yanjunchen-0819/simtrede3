@@ -8807,6 +8807,252 @@ ensureCsvExportUI = function ensureCsvExportUiWorkbookFinalClean() {
   if (hint) hint.textContent = '可匯出單一資料表 CSV、全部分表 CSV，或直接匯出含多個工作表的 Excel 活頁簿。';
 };
 
+function navLocalDateKeyFinalPatch(input) {
+  const d = input instanceof Date ? input : new Date(input);
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function isWeekdayNavDateKeyFinalPatch(dateKey) {
+  if (!dateKey) return false;
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  const wd = dt.getDay();
+  return wd !== 0 && wd !== 6;
+}
+
+function buildNavDateKeyRangeFinalPatch(startKey, endKey) {
+  if (!startKey || !endKey) return [];
+  const [sy, sm, sd] = String(startKey).split('-').map(Number);
+  const [ey, em, ed] = String(endKey).split('-').map(Number);
+  const cur = new Date(sy, (sm || 1) - 1, sd || 1);
+  const end = new Date(ey, (em || 1) - 1, ed || 1);
+  const out = [];
+  while (cur <= end) {
+    const key = navLocalDateKeyFinalPatch(cur);
+    if (isWeekdayNavDateKeyFinalPatch(key)) out.push(key);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+}
+
+function deriveNavTimelineKeysFinalPatch() {
+  if (typeof period !== 'undefined' && period?.start && period?.end) {
+    return buildNavDateKeyRangeFinalPatch(
+      navLocalDateKeyFinalPatch(period.start),
+      navLocalDateKeyFinalPatch(period.end)
+    );
+  }
+
+  const dateKeys = [];
+  for (const grp of ['etf', 'stock']) {
+    const raw = state.groups?.[grp]?.navHistory || [];
+    const normalized = typeof normalizeNavHistoryPoints === 'function'
+      ? normalizeNavHistoryPoints(raw)
+      : raw;
+    for (const p of normalized) {
+      const key = p?.dayKey || (p?.t ? navLocalDateKeyFinalPatch(Number(p.t)) : '');
+      if (key && isWeekdayNavDateKeyFinalPatch(key)) dateKeys.push(key);
+    }
+  }
+
+  for (const o of state.orders || []) {
+    const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+    const executed = splitDateTimePatch(orderExecutedAtPatch(o));
+    const key = executed.date || o.settlement_date || submitted.date || '';
+    if (key && isWeekdayNavDateKeyFinalPatch(key)) dateKeys.push(key);
+  }
+
+  for (const ev of state.portfolioEvents || []) {
+    if (isVoidedPortfolioEventPatch(ev)) continue;
+    const key = ev.event_date || ev.date || '';
+    if (key && isWeekdayNavDateKeyFinalPatch(key)) dateKeys.push(key);
+  }
+
+  const sorted = [...new Set(dateKeys)].sort();
+  if (!sorted.length) return [];
+  return buildNavDateKeyRangeFinalPatch(sorted[0], sorted[sorted.length - 1]);
+}
+
+normalizeNavPointsPatch = function normalizeNavPointsPatchFinal(grp) {
+  const raw = state.groups?.[grp]?.navHistory || [];
+  const normalized = (typeof normalizeNavHistoryPoints === 'function' ? normalizeNavHistoryPoints(raw) : raw)
+    .map(p => ({
+      date: p?.dayKey || (p?.t ? navLocalDateKeyFinalPatch(Number(p.t)) : ''),
+      nav: Number(p?.nav),
+      cash: p?.cash,
+      marketValue: p?.marketValue,
+      cashRatio: p?.cashRatio,
+      marketExposureRatio: p?.marketExposureRatio,
+      largestPositionWeight: p?.largestPositionWeight
+    }))
+    .filter(p => p.date && Number.isFinite(p.nav) && p.nav > 0 && isWeekdayNavDateKeyFinalPatch(p.date))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const latestByDate = new Map();
+  for (const p of normalized) latestByDate.set(p.date, p);
+  const actualPoints = [...latestByDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const timeline = deriveNavTimelineKeysFinalPatch();
+  if (!timeline.length) return actualPoints;
+
+  const out = [];
+  let idx = 0;
+  let last = null;
+  for (const date of timeline) {
+    while (idx < actualPoints.length && actualPoints[idx].date <= date) {
+      last = actualPoints[idx];
+      idx += 1;
+    }
+    if (last) {
+      out.push({
+        date,
+        nav: Number(last.nav || 0),
+        cash: last.cash,
+        marketValue: last.marketValue,
+        cashRatio: last.cashRatio,
+        marketExposureRatio: last.marketExposureRatio,
+        largestPositionWeight: last.largestPositionWeight
+      });
+    } else {
+      out.push({
+        date,
+        nav: Number(INITIAL || 0),
+        cash: '',
+        marketValue: '',
+        cashRatio: '',
+        marketExposureRatio: '',
+        largestPositionWeight: ''
+      });
+    }
+  }
+  return out;
+};
+
+dailyReturnRowsPatch = function dailyReturnRowsPatchFinal() {
+  const timeline = deriveNavTimelineKeysFinalPatch();
+  const etf = normalizeNavPointsPatch('etf');
+  const stock = normalizeNavPointsPatch('stock');
+  const etfMap = new Map(etf.map((p, i) => [p.date, { ...p, prev: etf[i - 1]?.nav }]));
+  const stockMap = new Map(stock.map((p, i) => [p.date, { ...p, prev: stock[i - 1]?.nav }]));
+  const dates = timeline.length
+    ? timeline
+    : [...new Set([...etfMap.keys(), ...stockMap.keys()])].sort();
+
+  return dates.map(date => {
+    const e = etfMap.get(date);
+    const s = stockMap.get(date);
+    const eNav = Number(e?.nav || INITIAL);
+    const sNav = Number(s?.nav || INITIAL);
+    const ePrev = Number(e?.prev || 0);
+    const sPrev = Number(s?.prev || 0);
+    const er = ePrev > 0 ? eNav / ePrev - 1 : '';
+    const sr = sPrev > 0 ? sNav / sPrev - 1 : '';
+    return [
+      date,
+      eNav,
+      sNav,
+      er === '' ? '' : er,
+      sr === '' ? '' : sr,
+      eNav > 0 ? eNav / INITIAL - 1 : '',
+      sNav > 0 ? sNav / INITIAL - 1 : ''
+    ];
+  });
+};
+
+if (typeof recordLiveNavHistory === 'function') {
+  const previousRecordLiveNavHistoryFinalPatch = recordLiveNavHistory;
+  recordLiveNavHistory = function recordLiveNavHistoryFinalPatch() {
+    const now = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+    if (now.getDay() === 0 || now.getDay() === 6) return;
+    return previousRecordLiveNavHistoryFinalPatch();
+  };
+}
+
+renderNavChart = function renderNavChartFinalPatch() {
+  const el = qs('nav-chart');
+  if (!el) return;
+  const title = qs('nav-compare-note');
+
+  const rows = dailyReturnRowsPatch();
+  const labels = rows.map(r => {
+    const key = String(r[0] || '');
+    return key ? `${key.slice(5, 7)}/${key.slice(8, 10)}` : '';
+  });
+  const eData = rows.map(r => Number(r[5] || 0) * 100);
+  const sData = rows.map(r => Number(r[6] || 0) * 100);
+
+  const eLast = eData[eData.length - 1] ?? 0;
+  const sLast = sData[sData.length - 1] ?? 0;
+  const diffNum = eLast - sLast;
+  if (title) {
+    title.textContent = `ETF ${eLast >= 0 ? '+' : ''}${eLast.toFixed(2)}% / 個股 ${sLast >= 0 ? '+' : ''}${sLast.toFixed(2)}% / 差距 ${diffNum >= 0 ? '+' : ''}${diffNum.toFixed(2)}%`;
+    title.style.color = Math.abs(diffNum) >= 1 ? 'var(--text1)' : 'var(--text3)';
+  }
+
+  if (typeof navChart !== 'undefined' && navChart) navChart.destroy();
+  navChart = new Chart(el, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'ETF 組',
+          data: eData,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.18)',
+          pointBackgroundColor: '#60a5fa',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25
+        },
+        {
+          label: '個股組',
+          data: sData,
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,.18)',
+          pointBackgroundColor: '#fbbf24',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label} ${ctx.raw >= 0 ? '+' : ''}${Number(ctx.raw).toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: false },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        },
+        y: {
+          ticks: {
+            color: '#94a3b8',
+            callback: v => `${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`
+          },
+          grid: { color: 'rgba(255,255,255,.06)' }
+        }
+      }
+    }
+  });
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
