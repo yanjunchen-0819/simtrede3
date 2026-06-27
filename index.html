@@ -9224,6 +9224,180 @@ init = async function initPeriodNavFinalPatch() {
   renderNavChart();
 };
 
+function hydratePeriodStateFromInputsFinalPatch() {
+  if (period.start && period.end) return true;
+  const startVal = qs('period-start')?.value || '';
+  const endVal = qs('period-end')?.value || '';
+  if (!startVal || !endVal) return false;
+  const startDate = new Date(`${startVal}T00:00:00`);
+  const endDate = new Date(`${endVal}T23:59:59`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return false;
+  period.start = startDate;
+  period.end = endDate;
+  return true;
+}
+
+function getCompetitionTradingDaysFinalPatch() {
+  hydratePeriodStateFromInputsFinalPatch();
+  if (!period.start) return [];
+  const startKey = formatLocalDateKey(period.start);
+  const todayTwn = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+  let endKey = previousTradingDateKeyFinalPatch(todayTwn);
+  if (period.end) {
+    const configuredEnd = formatLocalDateKey(period.end);
+    if (configuredEnd < endKey) endKey = configuredEnd;
+  }
+  if (!startKey || !endKey || endKey < startKey) return [];
+  return buildNavDateKeyRangeFinalPatch(startKey, endKey)
+    .filter(key => key !== '1970-01-01');
+}
+
+function getActualNavPointsByGroupFinalPatch(grp) {
+  const raw = state.groups?.[grp]?.navHistory || [];
+  const normalized = (typeof normalizeNavHistoryPoints === 'function' ? normalizeNavHistoryPoints(raw) : raw)
+    .map(p => ({
+      date: p?.dayKey || (p?.t ? navLocalDateKeyFinalPatch(Number(p.t)) : ''),
+      nav: Number(p?.nav),
+      cash: p?.cash,
+      marketValue: p?.marketValue,
+      cashRatio: p?.cashRatio,
+      marketExposureRatio: p?.marketExposureRatio,
+      largestPositionWeight: p?.largestPositionWeight
+    }))
+    .filter(p =>
+      p.date &&
+      p.date !== '1970-01-01' &&
+      Number.isFinite(p.nav) &&
+      p.nav > 0 &&
+      isWeekdayNavDateKeyFinalPatch(p.date)
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const latestByDate = new Map();
+  for (const p of normalized) latestByDate.set(p.date, p);
+  return [...latestByDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+normalizeNavPointsPatch = function normalizeNavPointsPatchCompetitionFinal(grp) {
+  const actualPoints = getActualNavPointsByGroupFinalPatch(grp);
+  const actualMap = new Map(actualPoints.map(p => [p.date, p]));
+  const timeline = getCompetitionTradingDaysFinalPatch();
+  if (!timeline.length) return actualPoints;
+
+  const out = [];
+  let last = null;
+  for (const date of timeline) {
+    if (actualMap.has(date)) last = actualMap.get(date);
+    if (last) {
+      out.push({
+        date,
+        nav: Number(last.nav || 0),
+        cash: last.cash,
+        marketValue: last.marketValue,
+        cashRatio: last.cashRatio,
+        marketExposureRatio: last.marketExposureRatio,
+        largestPositionWeight: last.largestPositionWeight
+      });
+    }
+  }
+  return out;
+};
+
+dailyReturnRowsPatch = function dailyReturnRowsPatchCompetitionFinal() {
+  const timeline = getCompetitionTradingDaysFinalPatch();
+  const etf = normalizeNavPointsPatch('etf');
+  const stock = normalizeNavPointsPatch('stock');
+  const etfMap = new Map(etf.map((p, i) => [p.date, { ...p, prev: etf[i - 1]?.nav }]));
+  const stockMap = new Map(stock.map((p, i) => [p.date, { ...p, prev: stock[i - 1]?.nav }]));
+  const dates = timeline.length
+    ? timeline
+    : [...new Set([...etfMap.keys(), ...stockMap.keys()])].filter(d => d !== '1970-01-01').sort();
+
+  return dates.map(date => {
+    const e = etfMap.get(date);
+    const s = stockMap.get(date);
+    return [
+      date,
+      e?.nav ?? '',
+      s?.nav ?? '',
+      e?.prev ? (e.nav / e.prev - 1) : '',
+      s?.prev ? (s.nav / s.prev - 1) : '',
+      e?.nav ? (e.nav / INITIAL - 1) : '',
+      s?.nav ? (s.nav / INITIAL - 1) : ''
+    ];
+  }).filter(r => r[0] && r[0] !== '1970-01-01');
+};
+
+buildDailyNavRowsCleanExportPatch = function buildDailyNavRowsCleanExportPatchCompetitionFinal() {
+  return dailyReturnRowsPatch().map(r => [
+    r[0],
+    r[1] === '' ? '' : Number(r[1]),
+    r[2] === '' ? '' : Number(r[2]),
+    r[3] === '' ? '' : Number((Number(r[3]) * 100).toFixed(4)),
+    r[4] === '' ? '' : Number((Number(r[4]) * 100).toFixed(4)),
+    r[5] === '' ? '' : Number((Number(r[5]) * 100).toFixed(4)),
+    r[6] === '' ? '' : Number((Number(r[6]) * 100).toFixed(4))
+  ]);
+};
+
+updatePeriodUI = function updatePeriodUICompetitionFinal() {
+  hydratePeriodStateFromInputsFinalPatch();
+
+  const dot = qs('period-dot');
+  const label = qs('period-status-label');
+  const sub = qs('period-status-sub');
+  const cdEl = qs('period-countdown');
+  const expArea = qs('export-area');
+  const expHint = qs('export-hint');
+
+  if (!period.start || !period.end) {
+    if (dot) dot.className = 'period-dot not-set';
+    if (label) label.textContent = '尚未設定交易期間';
+    if (sub) sub.textContent = '請選擇開始與結束日期';
+    if (cdEl) cdEl.textContent = '';
+    if (expArea) expArea.style.display = 'none';
+    return;
+  }
+
+  const now = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+  const fmtDate = d => d.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' });
+
+  if (now < period.start) {
+    if (dot) dot.className = 'period-dot not-set';
+    if (label) label.textContent = '交易期間尚未開始';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      const daysLeft = Math.ceil((period.start - now) / 86400000);
+      cdEl.textContent = `剩 ${daysLeft} 天`;
+      cdEl.style.color = 'var(--text3)';
+    }
+    if (expArea) expArea.style.display = 'none';
+  } else if (now <= period.end) {
+    if (dot) dot.className = 'period-dot active';
+    if (label) label.textContent = '交易期間進行中';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      const msLeft = period.end - now;
+      const dLeft = Math.floor(msLeft / 86400000);
+      const hLeft = Math.floor((msLeft % 86400000) / 3600000);
+      cdEl.textContent = dLeft > 0 ? `剩 ${dLeft} 天` : `剩 ${hLeft} 小時`;
+      cdEl.style.color = dLeft <= 1 ? 'var(--red)' : 'var(--teal)';
+    }
+    if (expArea) expArea.style.display = 'block';
+    if (expHint) expHint.textContent = '匯出內容會依競賽期間整理。';
+  } else {
+    if (dot) dot.className = 'period-dot ended';
+    if (label) label.textContent = '交易期間已結束';
+    if (sub) sub.textContent = `${fmtDate(period.start)} → ${fmtDate(period.end)}`;
+    if (cdEl) {
+      cdEl.textContent = '已結束';
+      cdEl.style.color = 'var(--amber)';
+    }
+    if (expArea) expArea.style.display = 'block';
+    if (expHint) expHint.textContent = '競賽期間已結束，可匯出完整報表。';
+  }
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
