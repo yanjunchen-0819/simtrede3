@@ -6920,6 +6920,28 @@ exportFullReportPatch = function exportFullReportPatchOverride() {
     isValidPricePatch(s.price) ? '是' : '否'
   ]));
 
+  csvSectionPatch(rows, '九、交易行為分析', [
+    '組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'
+  ], ['etf', 'stock'].map(grp => {
+    const b = behaviorMetricsPatch(grp);
+    return [
+      groupLabelPatch(grp),
+      b.tradeCount,
+      b.buyCount,
+      b.sellCount,
+      b.buySellRatio === '' ? '--' : Number(b.buySellRatio).toFixed(2),
+      Number(b.tradeFrequencyPerDay).toFixed(2),
+      pctTextPatch(b.turnoverRate),
+      b.averageClosedHoldingDays === '' ? '--' : Number(b.averageClosedHoldingDays).toFixed(1),
+      b.averageOpenHoldingDays === '' ? '--' : Number(b.averageOpenHoldingDays).toFixed(1),
+      pctTextPatch(b.winRate),
+      b.profitFactor === '' ? '--' : Number(b.profitFactor).toFixed(2),
+      b.averageWin === '' ? '--' : Math.round(b.averageWin),
+      b.averageLoss === '' ? '--' : Math.round(b.averageLoss),
+      Math.round(b.largestSingleTradeAmount || 0)
+    ];
+  }));
+
   const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -6958,6 +6980,60 @@ exportSheetsPatch = function exportSheetsPatchOverride() {
       ...exportOpenOrderRowsPatch()
     ]
   };
+  sheets.behavior = {
+    filename: 'SimTrade_交易行為分析',
+    title: '九、交易行為分析',
+    rows: [
+      ['組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'],
+      ...['etf', 'stock'].map(grp => {
+        const b = behaviorMetricsPatch(grp);
+        return [
+          groupLabelPatch(grp),
+          b.tradeCount,
+          b.buyCount,
+          b.sellCount,
+          b.buySellRatio === '' ? '--' : Number(b.buySellRatio).toFixed(2),
+          Number(b.tradeFrequencyPerDay).toFixed(2),
+          pctTextPatch(b.turnoverRate),
+          b.averageClosedHoldingDays === '' ? '--' : Number(b.averageClosedHoldingDays).toFixed(1),
+          b.averageOpenHoldingDays === '' ? '--' : Number(b.averageOpenHoldingDays).toFixed(1),
+          pctTextPatch(b.winRate),
+          b.profitFactor === '' ? '--' : Number(b.profitFactor).toFixed(2),
+          b.averageWin === '' ? '--' : Math.round(b.averageWin),
+          b.averageLoss === '' ? '--' : Math.round(b.averageLoss),
+          Math.round(b.largestSingleTradeAmount || 0)
+        ];
+      })
+    ]
+  };
+
+  sheets.behavior = {
+    filename: 'SimTrade_交易行為分析',
+    title: '九、交易行為分析',
+    rows: [
+      ['組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'],
+      ...['etf', 'stock'].map(grp => {
+        const b = behaviorMetricsPatch(grp);
+        return [
+          groupLabelPatch(grp),
+          b.tradeCount,
+          b.buyCount,
+          b.sellCount,
+          b.buySellRatio === '' ? '--' : Number(b.buySellRatio).toFixed(2),
+          Number(b.tradeFrequencyPerDay).toFixed(2),
+          pctTextPatch(b.turnoverRate),
+          b.averageClosedHoldingDays === '' ? '--' : Number(b.averageClosedHoldingDays).toFixed(1),
+          b.averageOpenHoldingDays === '' ? '--' : Number(b.averageOpenHoldingDays).toFixed(1),
+          pctTextPatch(b.winRate),
+          b.profitFactor === '' ? '--' : Number(b.profitFactor).toFixed(2),
+          b.averageWin === '' ? '--' : Math.round(b.averageWin),
+          b.averageLoss === '' ? '--' : Math.round(b.averageLoss),
+          Math.round(b.largestSingleTradeAmount || 0)
+        ];
+      })
+    ]
+  };
+
   return sheets;
 };
 
@@ -7254,6 +7330,7 @@ ensureCsvExportUI = function ensureCsvExportUiPatchedClean() {
   ensureOption('realized', '已實現損益明細');
   ensureOption('orders', '所有下單紀錄');
   ensureOption('positions', '期末持股快照');
+  ensureOption('behavior', '交易行為分析');
 };
 
 exportReport = exportFullReportPatch;
@@ -7732,6 +7809,166 @@ resetAll = async function resetAllPatched() {
 setInterval(() => {
   try { updateMarketStatusBanner(); } catch {}
 }, 1000);
+
+function behaviorRowsForExportFinalPatch() {
+  return ['etf', 'stock'].map(grp => {
+    const b = behaviorMetricsPatch(grp);
+    return [
+      groupLabelPatch(grp),
+      b.tradeCount,
+      b.buyCount,
+      b.sellCount,
+      b.buySellRatio === '' ? '--' : Number(b.buySellRatio).toFixed(2),
+      Number(b.tradeFrequencyPerDay || 0).toFixed(2),
+      pctTextPatch(b.turnoverRate),
+      b.averageClosedHoldingDays === '' ? '--' : Number(b.averageClosedHoldingDays).toFixed(1),
+      b.averageOpenHoldingDays === '' ? '--' : Number(b.averageOpenHoldingDays).toFixed(1),
+      pctTextPatch(b.winRate),
+      b.profitFactor === '' ? '--' : Number(b.profitFactor).toFixed(2),
+      b.averageWin === '' ? '--' : Math.round(b.averageWin),
+      b.averageLoss === '' ? '--' : Math.round(b.averageLoss),
+      Math.round(b.largestSingleTradeAmount || 0)
+    ];
+  });
+}
+
+function appendBehaviorSectionFinalPatch(rows) {
+  csvSectionPatch(rows, '九、交易行為分析', [
+    '組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'
+  ], behaviorRowsForExportFinalPatch());
+}
+
+const previousExportFullReportFinalPatch = exportFullReportPatch;
+exportFullReportPatch = function exportFullReportPatchFinal() {
+  const rows = [];
+  const periodLabel = typeof period !== 'undefined' && period?.start && period?.end
+    ? `${period.start.toLocaleDateString('zh-TW')} ~ ${period.end.toLocaleDateString('zh-TW')}`
+    : '全期間';
+
+  rows.push(['SimTrade 完整分析報告']);
+  rows.push(['匯出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push(['統計期間', periodLabel]);
+  rows.push(['初始資金', INITIAL]);
+  rows.push([]);
+
+  csvSectionPatch(rows, '一、績效摘要', [
+    '組別','NAV','現金','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率(%)','成交筆數','手續費合計','交易稅合計','股息合計','最大回撤(%)','夏普值','資金使用率(%)','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '二、成交明細', [
+    '下單日期','下單時間','成交日期','成交時間','組別','方向','商品代號','商品名稱','數量(股/單位)','成交價','下單價','成交金額','手續費','交易稅','淨交割金額','備註'
+  ], exportExecutedRowsPatch());
+
+  csvSectionPatch(rows, '三、已實現損益明細', [
+    '組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','數量(股/單位)','平均成本','成交價','成交金額','手續費','交易稅','淨交割金額','已實現損益'
+  ], realizedTradeRowsPatch());
+
+  csvSectionPatch(rows, '四、所有下單紀錄', [
+    '下單日期','下單時間','成交日期','成交時間','組別','狀態','方向','商品代號','商品名稱','數量(股/單位)','下單價','委託金額','手續費','交易稅','淨交割金額','備註'
+  ], exportOpenOrderRowsPatch());
+
+  const positionRows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      positionRows.push([
+        groupLabelPatch(grp),
+        symbolFullPatch(p.symbol),
+        state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0,
+        p.avgPrice || 0,
+        price,
+        marketValue,
+        cost,
+        unrealized,
+        cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+        nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+      ]);
+    }
+  }
+
+  csvSectionPatch(rows, '五、期末持股快照', [
+    '組別','商品代號','商品名稱','持股數量','平均成本','現價','市值','持股成本','未實現損益','未實現報酬率(%)','NAV佔比(%)'
+  ], positionRows);
+
+  csvSectionPatch(rows, '六、風控摘要', [
+    '組別','NAV','最大回撤(%)','資金使用率(%)','持股成本','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.maxDD.toFixed(2), m.utilizationPct, m.totalCost, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '七、除權息與人工調整', [
+    '日期','組別','商品代號','事件類型','現金金額','股數變動','備註'
+  ], (state.portfolioEvents || []).map(ev => [
+    ev.event_date || ev.date || '',
+    groupLabelPatch(ev.group || ev.grp),
+    symbolFullPatch(ev.symbol || ''),
+    ev.event_type || '',
+    ev.cash_amount ?? ev.amount ?? '',
+    ev.share_delta ?? ev.qty_delta ?? '',
+    ev.note || ev.comment || ''
+  ]));
+
+  csvSectionPatch(rows, '八、報價快照', [
+    '商品代號','商品名稱','現價','昨收/基準價','漲跌幅(%)','報價時間','是否有有效報價'
+  ], Object.entries(state.securities || {}).map(([sym, s]) => [
+    symbolFullPatch(sym), s.name || '', s.price ?? '', s.base ?? '', s.changeRate ?? '',
+    s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '是' : '否'
+  ]));
+
+  appendBehaviorSectionFinalPatch(rows);
+
+  const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('完整分析 CSV 已匯出', 'success');
+};
+
+const previousExportSheetsFinalPatch = exportSheetsPatch;
+exportSheetsPatch = function exportSheetsPatchFinal() {
+  const sheets = previousExportSheetsFinalPatch();
+  sheets.behavior = {
+    filename: 'SimTrade_交易行為分析',
+    title: '九、交易行為分析',
+    rows: [
+      ['組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'],
+      ...behaviorRowsForExportFinalPatch()
+    ]
+  };
+  return sheets;
+};
+
+const previousEnsureCsvExportUiFinalPatch = ensureCsvExportUI;
+ensureCsvExportUI = function ensureCsvExportUiFinal() {
+  previousEnsureCsvExportUiFinalPatch();
+  const select = qs('export-sheet-select');
+  if (!select) return;
+  let opt = select.querySelector('option[value="behavior"]');
+  if (!opt) {
+    opt = document.createElement('option');
+    opt.value = 'behavior';
+    select.appendChild(opt);
+  }
+  opt.textContent = '交易行為分析';
+};
+
+exportReport = exportFullReportPatch;
+exportRiskReport = exportFullReportPatch;
 
 // ===== SimTrade minimal patch END =====
 init();
