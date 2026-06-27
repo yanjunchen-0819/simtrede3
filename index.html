@@ -9398,6 +9398,418 @@ updatePeriodUI = function updatePeriodUICompetitionFinal() {
   }
 };
 
+const navDailyCloseCacheFinalPatch = new Map();
+let navRenderSeqFinalPatch = 0;
+
+function navOrderIsExecutedFinalPatch(order) {
+  const status = String(order?.status || '').toLowerCase();
+  return status === 'executed' || status === 'filled';
+}
+
+function navRangeForPeriodFinalPatch(startKey, endKey) {
+  if (!startKey || !endKey) return '1mo';
+  const start = new Date(`${startKey}T00:00:00`);
+  const end = new Date(`${endKey}T00:00:00`);
+  const days = Math.max(1, Math.ceil((end - start) / 86400000) + 5);
+  if (days <= 35) return '1mo';
+  if (days <= 95) return '3mo';
+  if (days <= 185) return '6mo';
+  if (days <= 370) return '1y';
+  return '3y';
+}
+
+async function fetchDailyCloseSeriesFinalPatch(symbol, startKey, endKey) {
+  const cacheKey = `${symbol}|${startKey}|${endKey}`;
+  if (navDailyCloseCacheFinalPatch.has(cacheKey)) return navDailyCloseCacheFinalPatch.get(cacheKey);
+
+  let rows = [];
+  try {
+    const { data, error } = await db.functions.invoke('history-function', {
+      body: {
+        symbol,
+        range: navRangeForPeriodFinalPatch(startKey, endKey),
+        interval: '1d'
+      }
+    });
+    if (error) throw error;
+    rows = Array.isArray(data?.candles)
+      ? data.candles
+          .map(c => ({
+            date: String(c?.time || c?.date || '').slice(0, 10),
+            close: Number(c?.close)
+          }))
+          .filter(r => r.date && Number.isFinite(r.close) && r.close > 0)
+          .sort((a, b) => a.date.localeCompare(b.date))
+      : [];
+  } catch (err) {
+    console.warn('fetchDailyCloseSeriesFinalPatch failed:', symbol, err);
+  }
+
+  navDailyCloseCacheFinalPatch.set(cacheKey, rows);
+  return rows;
+}
+
+function pickCloseOnOrBeforeFinalPatch(series, dateKey) {
+  if (!Array.isArray(series) || !series.length) return null;
+  let last = null;
+  for (const row of series) {
+    if (row.date > dateKey) break;
+    last = row.close;
+  }
+  return Number.isFinite(last) ? last : null;
+}
+
+async function buildGroupDailyNavSeriesAccurateFinalPatch(grp, dateKeys) {
+  if (!dateKeys.length) return [];
+
+  const orders = (state.orders || [])
+    .filter(o => navOrderIsExecutedFinalPatch(o) && getOrderGroupPatch(o) === grp)
+    .map(o => {
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      const submittedAt = splitDateTimePatch(orderSubmittedAtPatch(o));
+      return {
+        kind: 'order',
+        date: executedAt.date || o.settlement_date || submittedAt.date || '',
+        time: executedAt.time || o.time || '13:30:00',
+        data: o
+      };
+    })
+    .filter(x => x.date);
+
+  const events = (state.portfolioEvents || [])
+    .filter(ev => !isVoidedPortfolioEventPatch(ev) && (ev.group || ev.grp) === grp)
+    .map(ev => ({
+      kind: 'event',
+      date: ev.event_date || ev.date || '',
+      time: '08:59:59',
+      data: ev
+    }))
+    .filter(x => x.date);
+
+  const timeline = [...orders, ...events].sort((a, b) =>
+    `${a.date} ${a.time} ${a.kind}`.localeCompare(`${b.date} ${b.time} ${b.kind}`)
+  );
+
+  const symbolSet = new Set();
+  timeline.forEach(item => {
+    const sym = symbolFullPatch(item?.data?.symbol || '');
+    if (sym) symbolSet.add(sym);
+  });
+  (state.groups?.[grp]?.positions || []).forEach(p => {
+    const sym = symbolFullPatch(p.symbol);
+    if (sym) symbolSet.add(sym);
+  });
+
+  const startKey = dateKeys[0];
+  const endKey = dateKeys[dateKeys.length - 1];
+  const closeSeriesEntries = await Promise.all(
+    [...symbolSet].map(async sym => [sym, await fetchDailyCloseSeriesFinalPatch(sym, startKey, endKey)])
+  );
+  const closeSeriesMap = new Map(closeSeriesEntries);
+
+  const positions = new Map();
+  const lastMarkMap = new Map();
+  let cash = INITIAL;
+  let idx = 0;
+  const out = [];
+
+  const ensurePos = sym => {
+    if (!positions.has(sym)) positions.set(sym, { qty: 0, avgPrice: 0 });
+    return positions.get(sym);
+  };
+
+  for (const dateKey of dateKeys) {
+    while (idx < timeline.length && timeline[idx].date <= dateKey) {
+      const item = timeline[idx];
+      if (item.kind === 'order') {
+        const o = item.data;
+        const sym = symbolFullPatch(o.symbol);
+        const qty = Number(o.qty || 0);
+        const amount = Number(o.amount || 0);
+        const fee = Number(o.fee_amount || 0);
+        const tax = Number(o.tax_amount || 0);
+        const settlement = Number(
+          o.settlement_amount ||
+          (o.side === 'buy' ? amount + fee + tax : amount - fee - tax) ||
+          0
+        );
+        const px = Number(o.settlement_price ?? o.price ?? 0);
+        if (Number.isFinite(px) && px > 0) lastMarkMap.set(sym, px);
+
+        const pos = ensurePos(sym);
+        if (o.side === 'buy') {
+          cash -= settlement;
+          const totalCost = pos.avgPrice * pos.qty + amount + fee + tax;
+          pos.qty += qty;
+          pos.avgPrice = pos.qty > 0 ? totalCost / pos.qty : 0;
+        } else {
+          cash += settlement;
+          pos.qty = Math.max(0, pos.qty - qty);
+          if (pos.qty <= 0) positions.delete(sym);
+        }
+      } else {
+        const ev = item.data;
+        const sym = symbolFullPatch(ev.symbol || '');
+        const type = String(ev.event_type || ev.eventtype || '');
+        if (type === 'cash_dividend') {
+          cash += Number(ev.cash_amount ?? ev.amount ?? 0);
+        } else if (type === 'stock_dividend') {
+          const addQty = Number(ev.share_delta ?? ev.qty_delta ?? 0);
+          if (addQty > 0) {
+            const pos = ensurePos(sym);
+            const oldCost = pos.avgPrice * pos.qty;
+            pos.qty += addQty;
+            pos.avgPrice = pos.qty > 0 ? oldCost / pos.qty : 0;
+          }
+        }
+      }
+      idx += 1;
+    }
+
+    let marketValue = 0;
+    for (const [sym, pos] of positions.entries()) {
+      if (!pos || Number(pos.qty || 0) <= 0) continue;
+      const closeSeries = closeSeriesMap.get(sym) || [];
+      const closePx = pickCloseOnOrBeforeFinalPatch(closeSeries, dateKey);
+      const fallbackPx =
+        closePx ??
+        lastMarkMap.get(sym) ??
+        Number(state.securities?.[sym]?.base) ??
+        Number(state.securities?.[sym]?.price) ??
+        Number(pos.avgPrice || 0);
+      const price = Number.isFinite(fallbackPx) && fallbackPx > 0 ? fallbackPx : 0;
+      marketValue += price * Number(pos.qty || 0);
+    }
+
+    out.push({
+      date: dateKey,
+      nav: cash + marketValue,
+      cash,
+      marketValue
+    });
+  }
+
+  return out;
+}
+
+async function buildAccurateDailyNavRowsFinalPatch() {
+  const dates = getCompetitionTradingDaysFinalPatch().filter(d => d && d !== '1970-01-01');
+  if (!dates.length) return [];
+
+  const [etfSeries, stockSeries] = await Promise.all([
+    buildGroupDailyNavSeriesAccurateFinalPatch('etf', dates),
+    buildGroupDailyNavSeriesAccurateFinalPatch('stock', dates)
+  ]);
+
+  const etfMap = new Map(etfSeries.map((p, i) => [p.date, { ...p, prev: etfSeries[i - 1]?.nav }]));
+  const stockMap = new Map(stockSeries.map((p, i) => [p.date, { ...p, prev: stockSeries[i - 1]?.nav }]));
+
+  return dates.map(date => {
+    const e = etfMap.get(date);
+    const s = stockMap.get(date);
+    const eNav = Number(e?.nav || 0);
+    const sNav = Number(s?.nav || 0);
+    const eRet = e?.prev ? eNav / e.prev - 1 : '';
+    const sRet = s?.prev ? sNav / s.prev - 1 : '';
+    return {
+      date,
+      etfNav: eNav,
+      stockNav: sNav,
+      etfDailyReturn: eRet,
+      stockDailyReturn: sRet,
+      etfCumReturn: eNav > 0 ? eNav / INITIAL - 1 : '',
+      stockCumReturn: sNav > 0 ? sNav / INITIAL - 1 : ''
+    };
+  });
+}
+
+buildDailyNavRowsCleanExportPatch = async function buildDailyNavRowsCleanExportPatchAccurateFinal() {
+  const rows = await buildAccurateDailyNavRowsFinalPatch();
+  return rows.map(r => [
+    r.date,
+    Number(r.etfNav || 0),
+    Number(r.stockNav || 0),
+    r.etfDailyReturn === '' ? '' : Number((Number(r.etfDailyReturn) * 100).toFixed(4)),
+    r.stockDailyReturn === '' ? '' : Number((Number(r.stockDailyReturn) * 100).toFixed(4)),
+    r.etfCumReturn === '' ? '' : Number((Number(r.etfCumReturn) * 100).toFixed(4)),
+    r.stockCumReturn === '' ? '' : Number((Number(r.stockCumReturn) * 100).toFixed(4))
+  ]);
+};
+
+renderNavChart = async function renderNavChartAccurateFinalPatch() {
+  const renderSeq = ++navRenderSeqFinalPatch;
+  const el = qs('nav-chart');
+  if (!el) return;
+  const title = qs('nav-compare-note');
+  const rows = await buildAccurateDailyNavRowsFinalPatch();
+  if (renderSeq !== navRenderSeqFinalPatch) return;
+
+  const labels = rows.map(r => `${String(r.date).slice(5, 7)}/${String(r.date).slice(8, 10)}`);
+  const eData = rows.map(r => r.etfCumReturn === '' ? null : Number(r.etfCumReturn) * 100);
+  const sData = rows.map(r => r.stockCumReturn === '' ? null : Number(r.stockCumReturn) * 100);
+  const eLast = eData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const sLast = sData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const diffNum = eLast - sLast;
+
+  if (title) {
+    title.textContent = `ETF ${eLast >= 0 ? '+' : ''}${eLast.toFixed(2)}% / 個股 ${sLast >= 0 ? '+' : ''}${sLast.toFixed(2)}% / 差距 ${diffNum >= 0 ? '+' : ''}${diffNum.toFixed(2)}%`;
+    title.style.color = Math.abs(diffNum) >= 1 ? 'var(--text1)' : 'var(--text3)';
+  }
+
+  if (typeof navChart !== 'undefined' && navChart) navChart.destroy();
+  navChart = new Chart(el, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'ETF 組',
+          data: eData,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.18)',
+          pointBackgroundColor: '#60a5fa',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        },
+        {
+          label: '個股組',
+          data: sData,
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,.18)',
+          pointBackgroundColor: '#fbbf24',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label} ${ctx.raw >= 0 ? '+' : ''}${Number(ctx.raw).toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: false },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        },
+        y: {
+          ticks: {
+            color: '#94a3b8',
+            callback: v => `${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`
+          },
+          grid: { color: 'rgba(255,255,255,.06)' }
+        }
+      }
+    }
+  });
+};
+
+async function buildCleanExportSheetsAccurateFinalPatch() {
+  const sheets = buildCleanExportSheetsFinalPatch();
+  const navRows = await buildDailyNavRowsCleanExportPatch();
+  if (sheets?.daily_nav) {
+    sheets.daily_nav.rows = [
+      ['日期','ETF組NAV','個股組NAV','ETF組每日報酬率(%)','個股組每日報酬率(%)','ETF組累積報酬率(%)','個股組累積報酬率(%)'],
+      ...navRows
+    ];
+  }
+  return sheets;
+}
+
+exportSelectedCsvPatch = async function exportSelectedCsvPatchAccurateFinal() {
+  const key = qs('export-sheet-select')?.value || 'full';
+  const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+  if (key === 'full') {
+    const rows = [['SimTrade 完整分析報告'], ['匯出時間', new Date().toLocaleString('zh-TW')], []];
+    Object.values(sheets).forEach(sheet => {
+      rows.push([`=== ${sheet.title} ===`], ...sheet.rows, []);
+    });
+    const csv = '\uFEFF' + rows.map(r => r.map(csvCellPatch).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('完整分析報告 CSV 已匯出', 'success');
+    return;
+  }
+  const sheet = sheets[key];
+  if (!sheet) return;
+  downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows);
+  toast('CSV 已匯出', 'success');
+};
+
+exportAllCsvPatch = async function exportAllCsvPatchAccurateFinal() {
+  const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+  Object.values(sheets).forEach((sheet, idx) => {
+    setTimeout(() => downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows), idx * 250);
+  });
+  toast('全部 CSV 已開始匯出', 'success');
+};
+
+exportExcelWorkbookPatch = async function exportExcelWorkbookPatchAccurateFinal() {
+  const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+  const orderedSheets = [
+    ['摘要', sheets.summary.rows],
+    ['每日NAV', sheets.daily_nav.rows],
+    ['每日風險', sheets.daily_risk.rows],
+    ['每日持股', sheets.daily_holdings.rows],
+    ['每日現金流', sheets.daily_cashflow.rows],
+    ['成交明細', sheets.trades.rows],
+    ['已實現損益', sheets.realized.rows],
+    ['所有訂單', sheets.orders.rows],
+    ['期末持股', sheets.positions.rows],
+    ['調整紀錄', sheets.adjustments.rows],
+    ['報價快照', sheets.quotes.rows],
+    ['交易行為', sheets.behavior.rows]
+  ];
+
+  const workbookXml =
+    `<?xml version="1.0"?>` +
+    `<?mso-application progid="Excel.Sheet"?>` +
+    `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"` +
+    ` xmlns:o="urn:schemas-microsoft-com:office:office"` +
+    ` xmlns:x="urn:schemas-microsoft-com:office:excel"` +
+    ` xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"` +
+    ` xmlns:html="http://www.w3.org/TR/REC-html40">` +
+    `<Styles>` +
+    `<Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/></Style>` +
+    `<Style ss:ID="Header"><Font ss:Bold="1"/></Style>` +
+    `</Styles>` +
+    orderedSheets.map(([name, rows]) => workbookSheetXmlPatch(name, rows)).join('') +
+    `</Workbook>`;
+
+  const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `SimTrade_完整分析報告_${new Date().toISOString().slice(0, 10)}.xls`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Excel 活頁簿已匯出', 'success');
+};
+
+exportFullReportPatch = exportSelectedCsvPatch;
+exportReport = exportSelectedCsvPatch;
+exportRiskReport = exportSelectedCsvPatch;
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
