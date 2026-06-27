@@ -7970,6 +7970,843 @@ ensureCsvExportUI = function ensureCsvExportUiFinal() {
 exportReport = exportFullReportPatch;
 exportRiskReport = exportFullReportPatch;
 
+function cleanGroupLabelForExportPatch(grp) {
+  return String(grp || '') === 'etf' ? 'ETF組' : '個股組';
+}
+
+function cleanSideLabelForExportPatch(side) {
+  return String(side || '') === 'buy' ? '買入' : '賣出';
+}
+
+function cleanStatusLabelForExportPatch(status) {
+  const value = String(status || '').toLowerCase();
+  if (value === 'executed' || value === 'filled') return '已成交';
+  if (value === 'pending' || value === 'approved') return '待成交';
+  if (value === 'rejected') return '已拒絕';
+  if (value === 'cancelled') return '已取消';
+  if (value === 'expired') return '已失效';
+  return status || '';
+}
+
+function percentNumberForExportPatch(value) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '';
+  return Number((Number(value) * 100).toFixed(4));
+}
+
+function buildSummaryRowsCleanExportPatch() {
+  return ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [
+      cleanGroupLabelForExportPatch(grp),
+      Number(m.nav || 0),
+      Number(m.cash || 0),
+      Number(m.marketValue || 0),
+      Number(m.totalCost || 0),
+      Number(m.realized || 0),
+      Number(m.unrealized || 0),
+      Number(m.totalPnl || 0),
+      Number(m.returnPct || 0),
+      Number(m.tradeCount || 0),
+      Number(m.feeTotal || 0),
+      Number(m.taxTotal || 0),
+      Number(m.dividendTotal || 0),
+      Number(m.maxDD || 0),
+      m.sharpe === '' || m.sharpe == null ? '' : Number(m.sharpe),
+      Number(m.utilizationPct || 0),
+      m.frozen || '否'
+    ];
+  });
+}
+
+function buildExecutedRowsCleanExportPatch() {
+  return (state.orders || [])
+    .filter(o => ['executed', 'filled'].includes(String(o.status || '').toLowerCase()))
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderExecutedAtPatch(a)).date || a.settlement_date || '';
+      const at = splitDateTimePatch(orderExecutedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderExecutedAtPatch(b)).date || b.settlement_date || '';
+      const bt = splitDateTimePatch(orderExecutedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        cleanGroupLabelForExportPatch(getOrderGroupPatch(o)),
+        cleanSideLabelForExportPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        Number(o.qty || 0),
+        Number(o.settlement_price ?? o.price ?? 0),
+        Number(o.price ?? 0),
+        Number(o.amount || 0),
+        Number(o.fee_amount || 0),
+        Number(o.tax_amount || 0),
+        Number(o.settlement_amount || 0),
+        o.comment || ''
+      ];
+    });
+}
+
+function buildRealizedRowsCleanExportPatch() {
+  const books = { etf: {}, stock: {} };
+  const rows = [];
+  const executed = (state.orders || [])
+    .filter(o => ['executed', 'filled'].includes(String(o.status || '').toLowerCase()))
+    .sort((a, b) => {
+      const at = new Date(orderSubmittedAtPatch(a) || a.created_at || 0).getTime() || 0;
+      const bt = new Date(orderSubmittedAtPatch(b) || b.created_at || 0).getTime() || 0;
+      return at - bt;
+    });
+
+  for (const order of executed) {
+    const grp = getOrderGroupPatch(order);
+    const sym = symbolFullPatch(order.symbol);
+    const qty = Number(order.qty || 0);
+    const amount = Number(order.amount || 0);
+    const fee = Number(order.fee_amount || 0);
+    const tax = Number(order.tax_amount || 0);
+    const settlement = Number(order.settlement_amount || (order.side === 'buy' ? amount + fee + tax : amount - fee - tax) || 0);
+    if (!books[grp][sym]) books[grp][sym] = { qty: 0, avgPrice: 0 };
+    const pos = books[grp][sym];
+
+    if (order.side === 'buy') {
+      const buyCost = amount + fee;
+      pos.avgPrice = pos.qty > 0 ? ((pos.avgPrice * pos.qty) + buyCost) / (pos.qty + qty) : (qty > 0 ? buyCost / qty : 0);
+      pos.qty += qty;
+      continue;
+    }
+
+    const avgCost = Number(pos.avgPrice || 0);
+    const costBasis = avgCost * qty;
+    const realized = settlement - costBasis;
+    const submitted = splitDateTimePatch(orderSubmittedAtPatch(order));
+    const executedAt = splitDateTimePatch(orderExecutedAtPatch(order));
+    rows.push([
+      cleanGroupLabelForExportPatch(grp),
+      submitted.date,
+      submitted.time,
+      executedAt.date || order.settlement_date || '',
+      executedAt.time,
+      sym,
+      order.name || '',
+      cleanSideLabelForExportPatch(order.side),
+      qty,
+      avgCost,
+      Number(order.settlement_price ?? order.price ?? 0),
+      amount,
+      fee,
+      tax,
+      settlement,
+      realized
+    ]);
+
+    pos.qty = Math.max(0, pos.qty - qty);
+    if (pos.qty <= 0) pos.avgPrice = 0;
+  }
+
+  return rows;
+}
+
+function buildAllOrderRowsCleanExportPatch() {
+  return (state.orders || [])
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderSubmittedAtPatch(a)).date || '';
+      const at = splitDateTimePatch(orderSubmittedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderSubmittedAtPatch(b)).date || '';
+      const bt = splitDateTimePatch(orderSubmittedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        cleanGroupLabelForExportPatch(getOrderGroupPatch(o)),
+        cleanStatusLabelForExportPatch(o.status),
+        cleanSideLabelForExportPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        Number(o.qty || 0),
+        Number(o.price ?? 0),
+        Number(o.amount || 0),
+        Number(o.fee_amount || 0),
+        Number(o.tax_amount || 0),
+        Number(o.settlement_amount || 0),
+        o.comment || ''
+      ];
+    });
+}
+
+function buildCurrentPositionRowsCleanExportPatch() {
+  const rows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      rows.push([
+        cleanGroupLabelForExportPatch(grp),
+        symbolFullPatch(p.symbol),
+        state.securities?.[p.symbol]?.name || p.name || '',
+        Number(p.qty || 0),
+        Number(p.avgPrice || 0),
+        Number(price || 0),
+        Number(marketValue || 0),
+        Number(cost || 0),
+        Number(unrealized || 0),
+        cost ? Number(((unrealized / cost) * 100).toFixed(4)) : 0,
+        nav ? Number(((marketValue / nav) * 100).toFixed(4)) : 0
+      ]);
+    }
+  }
+  return rows;
+}
+
+function buildAdjustmentRowsCleanExportPatch() {
+  return (state.portfolioEvents || []).map(ev => [
+    ev.id || '',
+    ev.event_date || ev.date || '',
+    cleanGroupLabelForExportPatch(ev.group || ev.grp),
+    symbolFullPatch(ev.symbol || ''),
+    String(ev.event_type || '').replace('voided_', ''),
+    typeof isVoidedPortfolioEventPatch === 'function' && isVoidedPortfolioEventPatch(ev) ? '已退回' : '有效',
+    Number(ev.cash_amount ?? ev.amount ?? 0),
+    Number(ev.share_delta ?? ev.qty_delta ?? 0),
+    ev.created_at || ''
+  ]);
+}
+
+function buildQuoteRowsCleanExportPatch() {
+  return Object.entries(state.securities || {}).map(([sym, s]) => [
+    symbolFullPatch(sym),
+    s.name || '',
+    Number(s.price ?? 0),
+    Number(s.base ?? 0),
+    Number(s.changeRate ?? 0),
+    s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '是' : '否'
+  ]);
+}
+
+function buildDailyNavRowsCleanExportPatch() {
+  return dailyReturnRowsPatch().map(r => [
+    r[0],
+    Number(r[1] || 0),
+    Number(r[2] || 0),
+    r[3] === '' ? '' : Number((Number(r[3]) * 100).toFixed(4)),
+    r[4] === '' ? '' : Number((Number(r[4]) * 100).toFixed(4)),
+    r[5] === '' ? '' : Number((Number(r[5]) * 100).toFixed(4)),
+    r[6] === '' ? '' : Number((Number(r[6]) * 100).toFixed(4))
+  ]);
+}
+
+function buildDailyRiskRowsCleanExportPatch() {
+  const rows = [];
+  for (const grp of ['etf', 'stock']) {
+    const points = normalizeNavPointsPatch(grp);
+    const fallbackByDate = buildHistoricalRiskFallbackPatch(grp, points.map(p => p.date));
+    let peak = 0;
+    let maxDD = 0;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      const fallback = fallbackByDate.get(p.date) || {};
+      peak = Math.max(peak, p.nav);
+      const dailyReturn = i > 0 ? p.nav / points[i - 1].nav - 1 : '';
+      const drawdown = peak > 0 ? p.nav / peak - 1 : 0;
+      maxDD = Math.min(maxDD, drawdown);
+      const cash = p.cash ?? fallback.cash ?? '';
+      const marketValue = p.marketValue ?? fallback.marketValue ?? '';
+      const cashRatio = p.cashRatio ?? fallback.cashRatio ?? '';
+      const marketExposureRatio = p.marketExposureRatio ?? fallback.marketExposureRatio ?? '';
+      const largestPositionWeight = p.largestPositionWeight ?? fallback.largestPositionWeight ?? '';
+      rows.push([
+        p.date,
+        cleanGroupLabelForExportPatch(grp),
+        Number(p.nav || 0),
+        dailyReturn === '' ? '' : Number((Number(dailyReturn) * 100).toFixed(4)),
+        Number((((p.nav / INITIAL) - 1) * 100).toFixed(4)),
+        Number((drawdown * 100).toFixed(4)),
+        Number((maxDD * 100).toFixed(4)),
+        cash === '' ? '' : Number(cash),
+        marketValue === '' ? '' : Number(marketValue),
+        cashRatio === '' ? '' : Number((Number(cashRatio) * 100).toFixed(4)),
+        marketExposureRatio === '' ? '' : Number((Number(marketExposureRatio) * 100).toFixed(4)),
+        largestPositionWeight === '' ? '' : Number((Number(largestPositionWeight) * 100).toFixed(4))
+      ]);
+    }
+  }
+  return rows;
+}
+
+function buildDailyLedgerSnapshotsFinalPatch(grp) {
+  const dates = normalizeNavPointsPatch(grp).map(p => p.date).filter(Boolean);
+  const wantedDates = [...new Set(dates)].sort();
+  const riskByDate = new Map(buildDailyRiskRowsCleanExportPatch()
+    .filter(r => r[1] === cleanGroupLabelForExportPatch(grp))
+    .map(r => [r[0], { cash: r[7], marketValue: r[8], nav: r[2] }]));
+  const positions = new Map();
+  let cash = INITIAL;
+
+  const orders = (state.orders || [])
+    .filter(o => ['executed', 'filled'].includes(String(o.status || '').toLowerCase()) && getOrderGroupPatch(o) === grp)
+    .map(o => {
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return {
+        kind: 'order',
+        date: executedAt.date || o.settlement_date || '',
+        time: executedAt.time || '00:00:00',
+        order: o
+      };
+    });
+
+  const events = (state.portfolioEvents || [])
+    .filter(ev => !isVoidedPortfolioEventPatch(ev) && (ev.group || ev.grp) === grp)
+    .map(ev => ({
+      kind: 'event',
+      date: ev.event_date || ev.date || '',
+      time: '08:59:59',
+      event: ev
+    }));
+
+  const timeline = [...orders, ...events]
+    .filter(x => x.date)
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+
+  let idx = 0;
+  const holdingRows = [];
+  const cashRows = [];
+
+  for (const date of wantedDates) {
+    const flow = {
+      buyAmount: 0,
+      sellAmount: 0,
+      fee: 0,
+      tax: 0,
+      cashDividend: 0,
+      stockDividendShares: 0,
+      netCashChange: 0
+    };
+
+    while (idx < timeline.length && timeline[idx].date <= date) {
+      const item = timeline[idx];
+      const sameDate = item.date === date;
+
+      if (item.kind === 'order') {
+        const o = item.order;
+        const sym = symbolFullPatch(o.symbol);
+        const qty = Number(o.qty || 0);
+        const amount = Number(o.amount || 0);
+        const fee = Number(o.fee_amount || 0);
+        const tax = Number(o.tax_amount || 0);
+        const settlement = Number(o.settlement_amount || (o.side === 'buy' ? amount + fee + tax : amount - fee - tax) || 0);
+        const prev = positions.get(sym) || { symbol: sym, name: o.name || state.securities?.[o.symbol]?.name || '', qty: 0, totalCost: 0 };
+
+        if (o.side === 'buy') {
+          prev.totalCost += amount + fee + tax;
+          prev.qty += qty;
+          positions.set(sym, prev);
+          cash -= settlement;
+          if (sameDate) {
+            flow.buyAmount += amount;
+            flow.fee += fee;
+            flow.tax += tax;
+            flow.netCashChange -= settlement;
+          }
+        } else {
+          const avgCost = prev.qty > 0 ? prev.totalCost / prev.qty : 0;
+          const removedCost = avgCost * qty;
+          prev.qty = Math.max(0, prev.qty - qty);
+          prev.totalCost = Math.max(0, prev.totalCost - removedCost);
+          if (prev.qty <= 0) positions.delete(sym);
+          else positions.set(sym, prev);
+          cash += settlement;
+          if (sameDate) {
+            flow.sellAmount += amount;
+            flow.fee += fee;
+            flow.tax += tax;
+            flow.netCashChange += settlement;
+          }
+        }
+      } else {
+        const ev = item.event;
+        const sym = symbolFullPatch(ev.symbol || '');
+        const type = String(ev.event_type || ev.eventtype || '');
+        const prev = positions.get(sym) || { symbol: sym, name: state.securities?.[ev.symbol]?.name || '', qty: 0, totalCost: 0 };
+        if (type === 'cash_dividend') {
+          const amt = Number(ev.cash_amount ?? ev.amount ?? 0);
+          cash += amt;
+          if (sameDate) {
+            flow.cashDividend += amt;
+            flow.netCashChange += amt;
+          }
+        }
+        if (type === 'stock_dividend') {
+          const addQty = Number(ev.share_delta ?? ev.qty_delta ?? 0);
+          if (addQty > 0) {
+            prev.qty += addQty;
+            positions.set(sym, prev);
+            if (sameDate) flow.stockDividendShares += addQty;
+          }
+        }
+      }
+
+      idx += 1;
+    }
+
+    const risk = riskByDate.get(date) || {};
+    const endingCash = risk.cash === '' || risk.cash == null ? Math.round(cash) : risk.cash;
+    const endingMarketValue = risk.marketValue === '' || risk.marketValue == null ? '' : risk.marketValue;
+    const endingNav = risk.nav === '' || risk.nav == null ? '' : risk.nav;
+
+    cashRows.push([
+      date,
+      cleanGroupLabelForExportPatch(grp),
+      Math.round(flow.buyAmount),
+      Math.round(flow.sellAmount),
+      Math.round(flow.fee),
+      Math.round(flow.tax),
+      Math.round(flow.cashDividend),
+      Math.round(flow.stockDividendShares),
+      Math.round(flow.netCashChange),
+      endingCash,
+      endingMarketValue,
+      endingNav
+    ]);
+
+    for (const pos of [...positions.values()].filter(p => Number(p.qty || 0) > 0)) {
+      const avgCost = pos.qty > 0 ? pos.totalCost / pos.qty : 0;
+      holdingRows.push([
+        date,
+        cleanGroupLabelForExportPatch(grp),
+        pos.symbol,
+        pos.name || state.securities?.[pos.symbol]?.name || '',
+        Number(pos.qty || 0),
+        Number(avgCost || 0),
+        Number(pos.totalCost || 0),
+        endingNav ? Number(((pos.totalCost / endingNav) * 100).toFixed(4)) : ''
+      ]);
+    }
+  }
+
+  return { holdingRows, cashRows };
+}
+
+function buildDailyHoldingRowsCleanExportPatch() {
+  const all = [];
+  for (const grp of ['etf', 'stock']) {
+    const result = buildDailyLedgerSnapshotsFinalPatch(grp);
+    all.push(...result.holdingRows);
+  }
+  return all;
+}
+
+function buildDailyCashflowRowsCleanExportPatch() {
+  const all = [];
+  for (const grp of ['etf', 'stock']) {
+    const result = buildDailyLedgerSnapshotsFinalPatch(grp);
+    all.push(...result.cashRows);
+  }
+  return all;
+}
+
+function buildBehaviorRowsCleanExportPatch() {
+  return ['etf', 'stock'].map(grp => {
+    const b = behaviorMetricsPatch(grp);
+    return [
+      cleanGroupLabelForExportPatch(grp),
+      b.tradeCount,
+      b.buyCount,
+      b.sellCount,
+      b.buySellRatio === '' ? '--' : Number(b.buySellRatio).toFixed(2),
+      Number(b.tradeFrequencyPerDay || 0).toFixed(2),
+      percentNumberForExportPatch(b.turnoverRate),
+      b.averageClosedHoldingDays === '' ? '--' : Number(b.averageClosedHoldingDays).toFixed(1),
+      b.averageOpenHoldingDays === '' ? '--' : Number(b.averageOpenHoldingDays).toFixed(1),
+      percentNumberForExportPatch(b.winRate),
+      b.profitFactor === '' ? '--' : Number(b.profitFactor).toFixed(2),
+      b.averageWin === '' ? '--' : Math.round(b.averageWin),
+      b.averageLoss === '' ? '--' : Math.round(b.averageLoss),
+      Math.round(b.largestSingleTradeAmount || 0)
+    ];
+  });
+}
+
+function buildCleanExportSheetsFinalPatch() {
+  return {
+    summary: {
+      filename: 'SimTrade_績效摘要',
+      title: '一、績效摘要',
+      rows: [
+        ['組別','NAV','現金','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率(%)','成交筆數','手續費合計','交易稅合計','股息合計','最大回撤(%)','夏普值','資金使用率(%)','是否凍結'],
+        ...buildSummaryRowsCleanExportPatch()
+      ]
+    },
+    daily_nav: {
+      filename: 'SimTrade_每日NAV',
+      title: '二、每日NAV與報酬',
+      rows: [
+        ['日期','ETF組NAV','個股組NAV','ETF組每日報酬率(%)','個股組每日報酬率(%)','ETF組累積報酬率(%)','個股組累積報酬率(%)'],
+        ...buildDailyNavRowsCleanExportPatch()
+      ]
+    },
+    daily_risk: {
+      filename: 'SimTrade_每日風控',
+      title: '三、每日風控快照',
+      rows: [
+        ['日期','組別','NAV','每日報酬率(%)','累積報酬率(%)','當日回撤(%)','最大回撤(%)','現金','持股市值','現金比率(%)','資金曝險比率(%)','最大單一持股比重(%)'],
+        ...buildDailyRiskRowsCleanExportPatch()
+      ]
+    },
+    daily_holdings: {
+      filename: 'SimTrade_每日持股快照',
+      title: '四、每日持股快照',
+      rows: [
+        ['日期','組別','商品代號','商品名稱','持股數量','平均成本','持股成本','持股成本占NAV(%)'],
+        ...buildDailyHoldingRowsCleanExportPatch()
+      ]
+    },
+    daily_cashflow: {
+      filename: 'SimTrade_每日資金變化',
+      title: '五、每日資金變化',
+      rows: [
+        ['日期','組別','買入金額','賣出金額','手續費','交易稅','現金股利','股票股利增加股數','淨現金變動','期末現金','期末持股市值','期末NAV'],
+        ...buildDailyCashflowRowsCleanExportPatch()
+      ]
+    },
+    trades: {
+      filename: 'SimTrade_成交明細',
+      title: '六、成交明細',
+      rows: [
+        ['下單日期','下單時間','成交日期','成交時間','組別','方向','商品代號','商品名稱','數量(股/單位)','成交價','下單價','成交金額','手續費','交易稅','淨交割金額','備註'],
+        ...buildExecutedRowsCleanExportPatch()
+      ]
+    },
+    realized: {
+      filename: 'SimTrade_已實現損益明細',
+      title: '七、已實現損益明細',
+      rows: [
+        ['組別','下單日期','下單時間','成交日期','成交時間','商品代號','商品名稱','方向','數量(股/單位)','平均成本','成交價','成交金額','手續費','交易稅','淨交割金額','已實現損益'],
+        ...buildRealizedRowsCleanExportPatch()
+      ]
+    },
+    orders: {
+      filename: 'SimTrade_所有下單紀錄',
+      title: '八、所有下單紀錄',
+      rows: [
+        ['下單日期','下單時間','成交日期','成交時間','組別','狀態','方向','商品代號','商品名稱','數量(股/單位)','下單價','委託金額','手續費','交易稅','淨交割金額','備註'],
+        ...buildAllOrderRowsCleanExportPatch()
+      ]
+    },
+    positions: {
+      filename: 'SimTrade_期末持股快照',
+      title: '九、期末持股快照',
+      rows: [
+        ['組別','商品代號','商品名稱','持股數量','平均成本','現價','市值','持股成本','未實現損益','未實現報酬率(%)','NAV佔比(%)'],
+        ...buildCurrentPositionRowsCleanExportPatch()
+      ]
+    },
+    adjustments: {
+      filename: 'SimTrade_除權息與人工調整',
+      title: '十、除權息與人工調整',
+      rows: [
+        ['事件ID','日期','組別','商品代號','事件類型','狀態','現金金額','股數變動','建立時間'],
+        ...buildAdjustmentRowsCleanExportPatch()
+      ]
+    },
+    quotes: {
+      filename: 'SimTrade_報價快照',
+      title: '十一、報價快照',
+      rows: [
+        ['商品代號','商品名稱','現價','昨收/基準價','漲跌幅(%)','報價時間','是否有有效報價'],
+        ...buildQuoteRowsCleanExportPatch()
+      ]
+    },
+    behavior: {
+      filename: 'SimTrade_交易行為分析',
+      title: '十二、交易行為分析',
+      rows: [
+        ['組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率(%)','平均已實現持有天數','平均未實現持有天數','勝率(%)','獲利因子','平均獲利','平均虧損','最大單筆交易金額'],
+        ...buildBehaviorRowsCleanExportPatch()
+      ]
+    }
+  };
+}
+
+function downloadRowsCsvCleanExportPatch(filename, title, rows) {
+  const out = [[`=== ${title} ===`], ['匯出時間', new Date().toLocaleString('zh-TW')], [], ...rows];
+  const csv = '\uFEFF' + out.map(r => r.map(csvCellPatch).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${filename}_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportSelectedCsvPatch() {
+  const key = qs('export-sheet-select')?.value || 'full';
+  const sheets = buildCleanExportSheetsFinalPatch();
+  if (key === 'full') {
+    const rows = [['SimTrade 完整分析報告'], ['匯出時間', new Date().toLocaleString('zh-TW')], []];
+    Object.values(sheets).forEach(sheet => {
+      rows.push([`=== ${sheet.title} ===`], ...sheet.rows, []);
+    });
+    const csv = '\uFEFF' + rows.map(r => r.map(csvCellPatch).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('完整分析 CSV 已匯出', 'success');
+    return;
+  }
+  const sheet = sheets[key];
+  if (!sheet) return;
+  downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows);
+  toast('CSV 已匯出', 'success');
+}
+
+function exportAllCsvPatch() {
+  const sheets = buildCleanExportSheetsFinalPatch();
+  Object.values(sheets).forEach((sheet, idx) => {
+    setTimeout(() => downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows), idx * 250);
+  });
+  toast('已開始下載各分頁 CSV', 'success');
+}
+
+function excelXmlEscapePatch(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function excelSheetNamePatch(name) {
+  return String(name || 'Sheet')
+    .replace(/[\\/*?:\[\]]/g, '_')
+    .slice(0, 31);
+}
+
+function workbookSheetXmlPatch(name, rows) {
+  const tableRows = rows.map((row, rowIndex) => {
+    const cells = row.map(cell => {
+      const isNumber = typeof cell === 'number' && Number.isFinite(cell);
+      const type = isNumber ? 'Number' : 'String';
+      const style = rowIndex === 0 ? ' ss:StyleID="Header"' : '';
+      return `<Cell${style}><Data ss:Type="${type}">${excelXmlEscapePatch(cell)}</Data></Cell>`;
+    }).join('');
+    return `<Row>${cells}</Row>`;
+  }).join('');
+  return `<Worksheet ss:Name="${excelXmlEscapePatch(excelSheetNamePatch(name))}"><Table>${tableRows}</Table></Worksheet>`;
+}
+
+function exportExcelWorkbookPatch() {
+  const sheets = buildCleanExportSheetsFinalPatch();
+  const orderedSheets = [
+    ['績效摘要', sheets.summary.rows],
+    ['每日NAV', sheets.daily_nav.rows],
+    ['每日風控', sheets.daily_risk.rows],
+    ['每日持股', sheets.daily_holdings.rows],
+    ['每日資金', sheets.daily_cashflow.rows],
+    ['成交明細', sheets.trades.rows],
+    ['已實現損益', sheets.realized.rows],
+    ['所有下單', sheets.orders.rows],
+    ['期末持股', sheets.positions.rows],
+    ['調整紀錄', sheets.adjustments.rows],
+    ['報價快照', sheets.quotes.rows],
+    ['交易行為', sheets.behavior.rows]
+  ];
+
+  const workbookXml =
+    `<?xml version="1.0"?>` +
+    `<?mso-application progid="Excel.Sheet"?>` +
+    `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"` +
+    ` xmlns:o="urn:schemas-microsoft-com:office:office"` +
+    ` xmlns:x="urn:schemas-microsoft-com:office:excel"` +
+    ` xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"` +
+    ` xmlns:html="http://www.w3.org/TR/REC-html40">` +
+    `<Styles>` +
+    `<Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/></Style>` +
+    `<Style ss:ID="Header"><Font ss:Bold="1"/></Style>` +
+    `</Styles>` +
+    orderedSheets.map(([name, rows]) => workbookSheetXmlPatch(name, rows)).join('') +
+    `</Workbook>`;
+
+  const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `SimTrade_完整分析報告_${new Date().toISOString().slice(0, 10)}.xls`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Excel 活頁簿已匯出', 'success');
+}
+
+exportFullReportPatch = exportSelectedCsvPatch;
+exportReport = exportSelectedCsvPatch;
+exportRiskReport = exportSelectedCsvPatch;
+
+ensureCsvExportUI = function ensureCsvExportUiWorkbookFinal() {
+  const exportArea = qs('export-area');
+  if (!exportArea) return;
+
+  let select = qs('export-sheet-select');
+  if (!select) {
+    const panel = document.createElement('div');
+    panel.style.margin = '8px 0';
+    panel.innerHTML = `
+      <select id="export-sheet-select" style="margin-bottom:8px">
+        <option value="full">完整分析報告</option>
+        <option value="summary">績效摘要</option>
+        <option value="daily_nav">每日NAV與報酬</option>
+        <option value="daily_risk">每日風控快照</option>
+        <option value="daily_holdings">每日持股快照</option>
+        <option value="daily_cashflow">每日資金變化</option>
+        <option value="trades">成交明細</option>
+        <option value="realized">已實現損益明細</option>
+        <option value="orders">所有下單紀錄</option>
+        <option value="positions">期末持股快照</option>
+        <option value="adjustments">除權息與人工調整</option>
+        <option value="quotes">報價快照</option>
+        <option value="behavior">交易行為分析</option>
+      </select>
+      <button class="btn btn-full btn-primary" style="margin-bottom:8px" onclick="exportSelectedCsvPatch()">匯出所選 CSV</button>
+      <button class="btn btn-full btn-stk" style="margin-bottom:8px" onclick="exportAllCsvPatch()">全部分開匯出 CSV</button>
+      <button class="btn btn-full btn-etf" id="export-excel-btn" style="margin-bottom:8px" onclick="exportExcelWorkbookPatch()">匯出 Excel 活頁簿</button>
+    `;
+    exportArea.insertBefore(panel, exportArea.firstChild);
+    select = qs('export-sheet-select');
+  } else {
+    const wanted = [
+      ['full', '完整分析報告'],
+      ['summary', '績效摘要'],
+      ['daily_nav', '每日NAV與報酬'],
+      ['daily_risk', '每日風控快照'],
+      ['daily_holdings', '每日持股快照'],
+      ['daily_cashflow', '每日資金變化'],
+      ['trades', '成交明細'],
+      ['realized', '已實現損益明細'],
+      ['orders', '所有下單紀錄'],
+      ['positions', '期末持股快照'],
+      ['adjustments', '除權息與人工調整'],
+      ['quotes', '報價快照'],
+      ['behavior', '交易行為分析']
+    ];
+    select.innerHTML = '';
+    wanted.forEach(([value, label]) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      select.appendChild(opt);
+    });
+    if (!qs('export-excel-btn')) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-full btn-etf';
+      btn.id = 'export-excel-btn';
+      btn.style.marginBottom = '8px';
+      btn.textContent = '匯出 Excel 活頁簿';
+      btn.onclick = exportExcelWorkbookPatch;
+      exportArea.appendChild(btn);
+    }
+  }
+
+  document.querySelectorAll('button[onclick="exportReport()"],button[onclick="exportRiskReport()"]')
+    .forEach(btn => { btn.textContent = '匯出完整分析報告 CSV'; });
+  const hint = qs('export-hint');
+  if (hint) hint.textContent = '可匯出單一資料表 CSV、全部分表 CSV，或直接匯出含多個工作表的 Excel 活頁簿。';
+};
+
+if (typeof updateAllMetrics === 'function') {
+  const previousUpdateAllMetricsWorkbookPatch = updateAllMetrics;
+  updateAllMetrics = function updateAllMetricsWorkbookPatched() {
+    previousUpdateAllMetricsWorkbookPatch();
+    ensureCsvExportUI();
+  };
+}
+
+ensureCsvExportUI = function ensureCsvExportUiWorkbookFinalClean() {
+  const exportArea = qs('export-area');
+  if (!exportArea) return;
+
+  let panel = document.getElementById('export-workbook-panel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'export-workbook-panel';
+    panel.style.margin = '8px 0';
+    exportArea.insertBefore(panel, exportArea.firstChild);
+  }
+
+  panel.innerHTML = '';
+
+  const select = document.createElement('select');
+  select.id = 'export-sheet-select';
+  select.style.marginBottom = '8px';
+  [
+    ['full', '完整分析報告'],
+    ['summary', '績效摘要'],
+    ['daily_nav', '每日NAV與報酬'],
+    ['daily_risk', '每日風控快照'],
+    ['daily_holdings', '每日持股快照'],
+    ['daily_cashflow', '每日資金變化'],
+    ['trades', '成交明細'],
+    ['realized', '已實現損益明細'],
+    ['orders', '所有下單紀錄'],
+    ['positions', '期末持股快照'],
+    ['adjustments', '除權息與人工調整'],
+    ['quotes', '報價快照'],
+    ['behavior', '交易行為分析']
+  ].forEach(([value, label]) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  });
+  panel.appendChild(select);
+
+  const btnCsv = document.createElement('button');
+  btnCsv.className = 'btn btn-full btn-primary';
+  btnCsv.style.marginBottom = '8px';
+  btnCsv.textContent = '匯出所選 CSV';
+  btnCsv.onclick = exportSelectedCsvPatch;
+  panel.appendChild(btnCsv);
+
+  const btnAllCsv = document.createElement('button');
+  btnAllCsv.className = 'btn btn-full btn-stk';
+  btnAllCsv.style.marginBottom = '8px';
+  btnAllCsv.textContent = '全部分開匯出 CSV';
+  btnAllCsv.onclick = exportAllCsvPatch;
+  panel.appendChild(btnAllCsv);
+
+  const btnExcel = document.createElement('button');
+  btnExcel.className = 'btn btn-full btn-etf';
+  btnExcel.id = 'export-excel-btn';
+  btnExcel.style.marginBottom = '8px';
+  btnExcel.textContent = '匯出 Excel 活頁簿';
+  btnExcel.onclick = exportExcelWorkbookPatch;
+  panel.appendChild(btnExcel);
+
+  document.querySelectorAll('button[onclick="exportReport()"],button[onclick="exportRiskReport()"]')
+    .forEach(btn => { btn.textContent = '匯出完整分析報告 CSV'; });
+  const hint = qs('export-hint');
+  if (hint) hint.textContent = '可匯出單一資料表 CSV、全部分表 CSV，或直接匯出含多個工作表的 Excel 活頁簿。';
+};
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
