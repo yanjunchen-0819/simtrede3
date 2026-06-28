@@ -10469,6 +10469,115 @@ exportExcelWorkbookPatch = function exportExcelWorkbookPatchV2() {
   }
 };
 
+function exportNumberIntPatch(value) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '';
+  return Math.round(Number(value));
+}
+
+function exportNumberPricePatch(value, digits = 2) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '';
+  return Number(Number(value).toFixed(digits));
+}
+
+function exportNumberPctPatch(value, digits = 4) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '';
+  return Number(Number(value).toFixed(digits));
+}
+
+function exportCellNormalizedPatch(value) {
+  if (value === '' || value == null) return '';
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
+    return trimmed;
+  }
+  return value;
+}
+
+buildQuoteRowsCleanExportPatch = function buildQuoteRowsCleanExportPatchFinalRounded() {
+  return Object.entries(state.securities || {}).map(([sym, s]) => [
+    symbolFullPatch(sym),
+    s.name || '',
+    exportNumberPricePatch(s.price ?? 0, 2),
+    exportNumberPricePatch(s.base ?? 0, 2),
+    exportNumberPctPatch(s.changeRate ?? 0, 2),
+    s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '有效' : '無效'
+  ]);
+};
+
+function buildDailyNavRowsFromAccurateCacheFinalPatchV3() {
+  return (accurateDailyNavRowsCacheFinalPatch || []).map(r => [
+    r.date,
+    r.etfNav === '' ? '' : exportNumberIntPatch(r.etfNav),
+    r.stockNav === '' ? '' : exportNumberIntPatch(r.stockNav),
+    r.etfDailyReturn === '' ? '' : exportNumberPctPatch(Number(r.etfDailyReturn) * 100, 4),
+    r.stockDailyReturn === '' ? '' : exportNumberPctPatch(Number(r.stockDailyReturn) * 100, 4),
+    r.etfCumReturn === '' ? '' : exportNumberPctPatch(Number(r.etfCumReturn) * 100, 4),
+    r.stockCumReturn === '' ? '' : exportNumberPctPatch(Number(r.stockCumReturn) * 100, 4)
+  ]);
+}
+
+buildDailyNavRowsCleanExportPatch = function buildDailyNavRowsCleanExportPatchV3() {
+  return buildDailyNavRowsFromAccurateCacheFinalPatchV3();
+};
+
+buildDailyRiskRowsCleanExportPatch = function buildDailyRiskRowsCleanExportPatchV4() {
+  const rows = [];
+  for (const grp of ['etf', 'stock']) {
+    const series = accurateDailyNavSeriesByGroupFinalPatchV3?.[grp] || [];
+    if (!series.length) continue;
+    const fallbackByDate = buildHistoricalRiskFallbackPatch(grp, series.map(p => p.date));
+    let peak = 0;
+    let maxDD = 0;
+    for (let i = 0; i < series.length; i++) {
+      const p = series[i];
+      const prevNav = series[i - 1]?.nav;
+      const fallback = fallbackByDate.get(p.date) || {};
+      const nav = Number(p.nav || 0);
+      peak = Math.max(peak, nav);
+      const dailyReturn = prevNav ? nav / prevNav - 1 : '';
+      const drawdown = peak > 0 ? nav / peak - 1 : 0;
+      maxDD = Math.min(maxDD, drawdown);
+      const cash = p.cash ?? fallback.cash ?? '';
+      const marketValue = p.marketValue ?? fallback.marketValue ?? '';
+      const cashRatio = nav > 0 && cash !== '' ? Number(cash) / nav : (fallback.cashRatio ?? '');
+      const marketExposureRatio = nav > 0 && marketValue !== '' ? Number(marketValue) / nav : (fallback.marketExposureRatio ?? '');
+      const largestPositionWeight = fallback.largestPositionWeight ?? '';
+      rows.push([
+        p.date,
+        cleanGroupLabelForExportPatch(grp),
+        exportNumberIntPatch(nav),
+        dailyReturn === '' ? '' : exportNumberPctPatch(Number(dailyReturn) * 100, 4),
+        exportNumberPctPatch(((nav / INITIAL) - 1) * 100, 4),
+        exportNumberPctPatch(drawdown * 100, 4),
+        exportNumberPctPatch(maxDD * 100, 4),
+        cash === '' ? '' : exportNumberIntPatch(cash),
+        marketValue === '' ? '' : exportNumberIntPatch(marketValue),
+        cashRatio === '' ? '' : exportNumberPctPatch(Number(cashRatio) * 100, 4),
+        marketExposureRatio === '' ? '' : exportNumberPctPatch(Number(marketExposureRatio) * 100, 4),
+        largestPositionWeight === '' ? '' : exportNumberPctPatch(Number(largestPositionWeight) * 100, 4)
+      ]);
+    }
+  }
+  return rows;
+};
+
+workbookSheetXmlPatch = function workbookSheetXmlPatchFinalNumeric(name, rows) {
+  const tableRows = rows.map((row, rowIndex) => {
+    const cells = row.map(cell => {
+      const normalized = exportCellNormalizedPatch(cell);
+      const isNumber = typeof normalized === 'number' && Number.isFinite(normalized);
+      const type = isNumber ? 'Number' : 'String';
+      const style = rowIndex === 0 ? ' ss:StyleID="Header"' : '';
+      return `<Cell${style}><Data ss:Type="${type}">${excelXmlEscapePatch(normalized)}</Data></Cell>`;
+    }).join('');
+    return `<Row>${cells}</Row>`;
+  }).join('');
+  return `<Worksheet ss:Name="${excelXmlEscapePatch(excelSheetNamePatch(name))}"><Table>${tableRows}</Table></Worksheet>`;
+};
+
 exportFullReportPatch = exportSelectedCsvPatch;
 exportReport = exportSelectedCsvPatch;
 exportRiskReport = exportSelectedCsvPatch;
