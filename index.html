@@ -5778,10 +5778,18 @@ function orderSubmittedAtPatch(order) {
 }
 
 function orderExecutedAtPatch(order) {
-  if (!order || order.status !== 'executed') return '';
-  return order?.scorecard?.executed_at || (String(order.raw_status || '').toLowerCase() === 'executed'
-    ? (order?.created_at || order?.createdat || '')
-    : '');
+  if (!order) return '';
+  const status = String(order.status || '').toLowerCase();
+  const rawStatus = String(order.raw_status || '').toLowerCase();
+  const isExecutedLike = ['executed', 'filled', 'done'].includes(status) || ['executed', 'filled', 'done'].includes(rawStatus);
+  if (!isExecutedLike) return '';
+  return order?.scorecard?.executed_at ||
+    order?.scorecard?.order_executed_at ||
+    order?.executed_at ||
+    order?.updated_at ||
+    order?.created_at ||
+    order?.createdat ||
+    '';
 }
 
 function splitDateTimePatch(raw) {
@@ -5797,7 +5805,7 @@ function splitDateTimePatch(raw) {
   }
   const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
   return {
-    date: local.toISOString().slice(0, 10),
+    date: formatLocalDateKey(local),
     time: local.toTimeString().slice(0, 8)
   };
 }
@@ -8863,7 +8871,7 @@ function deriveNavTimelineKeysFinalPatch() {
   for (const o of state.orders || []) {
     const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
     const executed = splitDateTimePatch(orderExecutedAtPatch(o));
-    const key = executed.date || o.settlement_date || submitted.date || '';
+    const key = executed.date || submitted.date || o.settlement_date || '';
     if (key && isWeekdayNavDateKeyFinalPatch(key)) dateKeys.push(key);
   }
 
@@ -9469,8 +9477,8 @@ async function buildGroupDailyNavSeriesAccurateFinalPatch(grp, dateKeys) {
       const submittedAt = splitDateTimePatch(orderSubmittedAtPatch(o));
       return {
         kind: 'order',
-        date: executedAt.date || o.settlement_date || submittedAt.date || '',
-        time: executedAt.time || o.time || '13:30:00',
+        date: executedAt.date || submittedAt.date || o.settlement_date || '',
+        time: executedAt.time || submittedAt.time || o.time || '13:30:00',
         data: o
       };
     })
