@@ -9810,6 +9810,555 @@ exportFullReportPatch = exportSelectedCsvPatch;
 exportReport = exportSelectedCsvPatch;
 exportRiskReport = exportSelectedCsvPatch;
 
+let accurateDailyNavRowsCacheFinalPatch = [];
+let accurateDailyNavRowsPromiseFinalPatch = null;
+
+function buildDailyNavRowsFromAccurateCacheFinalPatch() {
+  return (accurateDailyNavRowsCacheFinalPatch || []).map(r => [
+    r.date,
+    r.etfNav === '' ? '' : Number(r.etfNav || 0),
+    r.stockNav === '' ? '' : Number(r.stockNav || 0),
+    r.etfDailyReturn === '' ? '' : Number((Number(r.etfDailyReturn) * 100).toFixed(4)),
+    r.stockDailyReturn === '' ? '' : Number((Number(r.stockDailyReturn) * 100).toFixed(4)),
+    r.etfCumReturn === '' ? '' : Number((Number(r.etfCumReturn) * 100).toFixed(4)),
+    r.stockCumReturn === '' ? '' : Number((Number(r.stockCumReturn) * 100).toFixed(4))
+  ]);
+}
+
+async function refreshAccurateDailyNavRowsCacheFinalPatch(force = false) {
+  if (!force && accurateDailyNavRowsPromiseFinalPatch) return accurateDailyNavRowsPromiseFinalPatch;
+  accurateDailyNavRowsPromiseFinalPatch = (async () => {
+    try {
+      const rows = await buildAccurateDailyNavRowsFinalPatch();
+      accurateDailyNavRowsCacheFinalPatch = Array.isArray(rows) ? rows : [];
+      return accurateDailyNavRowsCacheFinalPatch;
+    } catch (err) {
+      console.error('refreshAccurateDailyNavRowsCacheFinalPatch failed:', err);
+      return accurateDailyNavRowsCacheFinalPatch;
+    } finally {
+      accurateDailyNavRowsPromiseFinalPatch = null;
+    }
+  })();
+  return accurateDailyNavRowsPromiseFinalPatch;
+}
+
+buildDailyNavRowsCleanExportPatch = function buildDailyNavRowsCleanExportPatchCachedFinal() {
+  return buildDailyNavRowsFromAccurateCacheFinalPatch();
+};
+
+buildCleanExportSheetsAccurateFinalPatch = async function buildCleanExportSheetsAccurateFinalPatchCached() {
+  await refreshAccurateDailyNavRowsCacheFinalPatch();
+  const sheets = buildCleanExportSheetsFinalPatch();
+  if (sheets?.daily_nav) {
+    sheets.daily_nav.rows = [
+      ['日期','ETF組NAV','個股組NAV','ETF組每日報酬率(%)','個股組每日報酬率(%)','ETF組累積報酬率(%)','個股組累積報酬率(%)'],
+      ...buildDailyNavRowsFromAccurateCacheFinalPatch()
+    ];
+  }
+  return sheets;
+};
+
+renderNavChart = async function renderNavChartAccurateCachedFinalPatch() {
+  const renderSeq = ++navRenderSeqFinalPatch;
+  const el = qs('nav-chart');
+  if (!el) return;
+  const title = qs('nav-compare-note');
+
+  await refreshAccurateDailyNavRowsCacheFinalPatch(true);
+  if (renderSeq !== navRenderSeqFinalPatch) return;
+
+  const rows = accurateDailyNavRowsCacheFinalPatch || [];
+  const labels = rows.map(r => `${String(r.date).slice(5, 7)}/${String(r.date).slice(8, 10)}`);
+  const eData = rows.map(r => r.etfCumReturn === '' ? null : Number(r.etfCumReturn) * 100);
+  const sData = rows.map(r => r.stockCumReturn === '' ? null : Number(r.stockCumReturn) * 100);
+  const eLast = eData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const sLast = sData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const diffNum = eLast - sLast;
+
+  if (title) {
+    title.textContent = `ETF ${eLast >= 0 ? '+' : ''}${eLast.toFixed(2)}% / 個股 ${sLast >= 0 ? '+' : ''}${sLast.toFixed(2)}% / 差距 ${diffNum >= 0 ? '+' : ''}${diffNum.toFixed(2)}%`;
+    title.style.color = Math.abs(diffNum) >= 1 ? 'var(--text1)' : 'var(--text3)';
+  }
+
+  if (typeof navChart !== 'undefined' && navChart) navChart.destroy();
+  navChart = new Chart(el, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'ETF 組',
+          data: eData,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.18)',
+          pointBackgroundColor: '#60a5fa',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        },
+        {
+          label: '個股組',
+          data: sData,
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,.18)',
+          pointBackgroundColor: '#fbbf24',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label} ${ctx.raw >= 0 ? '+' : ''}${Number(ctx.raw).toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: false },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        },
+        y: {
+          ticks: {
+            color: '#94a3b8',
+            callback: v => `${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`
+          },
+          grid: { color: 'rgba(255,255,255,.06)' }
+        }
+      }
+    }
+  });
+};
+
+exportSelectedCsvPatch = function exportSelectedCsvPatchGestureSafeFinal() {
+  const key = qs('export-sheet-select')?.value || 'full';
+  const start = async () => {
+    const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+    if (key === 'full') {
+      const rows = [['SimTrade 完整分析報告'], ['匯出時間', new Date().toLocaleString('zh-TW')], []];
+      Object.values(sheets).forEach(sheet => {
+        rows.push([`=== ${sheet.title} ===`], ...sheet.rows, []);
+      });
+      const csv = '\uFEFF' + rows.map(r => r.map(csvCellPatch).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('完整分析報告 CSV 已匯出', 'success');
+      return;
+    }
+    const sheet = sheets[key];
+    if (!sheet) return;
+    downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows);
+    toast('CSV 已匯出', 'success');
+  };
+  start().catch(err => {
+    console.error('exportSelectedCsvPatchGestureSafeFinal failed:', err);
+    toast('匯出失敗，請再試一次', 'danger');
+  });
+};
+
+exportAllCsvPatch = function exportAllCsvPatchGestureSafeFinal() {
+  const start = async () => {
+    const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+    Object.values(sheets).forEach((sheet, idx) => {
+      setTimeout(() => downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows), idx * 250);
+    });
+    toast('全部 CSV 已開始匯出', 'success');
+  };
+  start().catch(err => {
+    console.error('exportAllCsvPatchGestureSafeFinal failed:', err);
+    toast('匯出失敗，請再試一次', 'danger');
+  });
+};
+
+exportExcelWorkbookPatch = function exportExcelWorkbookPatchGestureSafeFinal() {
+  const start = async () => {
+    const sheets = await buildCleanExportSheetsAccurateFinalPatch();
+    const orderedSheets = [
+      ['摘要', sheets.summary.rows],
+      ['每日NAV', sheets.daily_nav.rows],
+      ['每日風險', sheets.daily_risk.rows],
+      ['每日持股', sheets.daily_holdings.rows],
+      ['每日現金流', sheets.daily_cashflow.rows],
+      ['成交明細', sheets.trades.rows],
+      ['已實現損益', sheets.realized.rows],
+      ['所有訂單', sheets.orders.rows],
+      ['期末持股', sheets.positions.rows],
+      ['調整紀錄', sheets.adjustments.rows],
+      ['報價快照', sheets.quotes.rows],
+      ['交易行為', sheets.behavior.rows]
+    ];
+    const workbookXml =
+      `<?xml version="1.0"?>` +
+      `<?mso-application progid="Excel.Sheet"?>` +
+      `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"` +
+      ` xmlns:o="urn:schemas-microsoft-com:office:office"` +
+      ` xmlns:x="urn:schemas-microsoft-com:office:excel"` +
+      ` xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"` +
+      ` xmlns:html="http://www.w3.org/TR/REC-html40">` +
+      `<Styles>` +
+      `<Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/></Style>` +
+      `<Style ss:ID="Header"><Font ss:Bold="1"/></Style>` +
+      `</Styles>` +
+      orderedSheets.map(([name, rows]) => workbookSheetXmlPatch(name, rows)).join('') +
+      `</Workbook>`;
+    const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SimTrade_完整分析報告_${new Date().toISOString().slice(0, 10)}.xls`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Excel 活頁簿已匯出', 'success');
+  };
+  start().catch(err => {
+    console.error('exportExcelWorkbookPatchGestureSafeFinal failed:', err);
+    toast('Excel 匯出失敗，請再試一次', 'danger');
+  });
+};
+
+exportFullReportPatch = exportSelectedCsvPatch;
+exportReport = exportSelectedCsvPatch;
+exportRiskReport = exportSelectedCsvPatch;
+
+function navFallbackRowsFinalPatchV2() {
+  try {
+    const rows = typeof dailyReturnRowsPatch === 'function' ? dailyReturnRowsPatch() : [];
+    return (rows || []).map(r => ({
+      date: r[0],
+      etfNav: r[1] === '' ? '' : Number(r[1] || 0),
+      stockNav: r[2] === '' ? '' : Number(r[2] || 0),
+      etfDailyReturn: r[3] === '' ? '' : Number(r[3] || 0),
+      stockDailyReturn: r[4] === '' ? '' : Number(r[4] || 0),
+      etfCumReturn: r[5] === '' ? '' : Number(r[5] || 0),
+      stockCumReturn: r[6] === '' ? '' : Number(r[6] || 0)
+    })).filter(r => r.date && r.date !== '1970-01-01');
+  } catch (err) {
+    console.error('navFallbackRowsFinalPatchV2 failed:', err);
+    return [];
+  }
+}
+
+function historySymbolCandidatesFinalPatchV2(symbol) {
+  const raw = String(symbol || '').trim().toUpperCase();
+  if (!raw) return [];
+  const base = raw.replace(/\.(TW|TWO)$/i, '');
+  const sec = state.securities?.[raw] || state.securities?.[base] || {};
+  const grp = String(sec.grp || '').toLowerCase();
+  const type = String(sec.type || '').toUpperCase();
+  const out = [];
+  if (raw.includes('.')) out.push(raw);
+  if (grp === 'etf' || type === 'ETF' || /^00/.test(base)) out.push(`${base}.TW`);
+  out.push(`${base}.TW`, `${base}.TWO`, base);
+  return Array.from(new Set(out.filter(Boolean)));
+}
+
+fetchDailyCloseSeriesFinalPatch = async function fetchDailyCloseSeriesFinalPatchV2(symbol, startKey, endKey) {
+  const cacheKey = `v2|${symbol}|${startKey}|${endKey}`;
+  if (navDailyCloseCacheFinalPatch.has(cacheKey)) return navDailyCloseCacheFinalPatch.get(cacheKey);
+
+  let rows = [];
+  const candidates = historySymbolCandidatesFinalPatchV2(symbol);
+  for (const candidate of candidates) {
+    try {
+      const { data, error } = await db.functions.invoke('history-function', {
+        body: {
+          symbol: candidate,
+          range: navRangeForPeriodFinalPatch(startKey, endKey),
+          interval: '1d'
+        }
+      });
+      if (error) continue;
+      const parsed = Array.isArray(data?.candles)
+        ? data.candles
+            .map(c => ({
+              date: String(c?.time || c?.date || '').slice(0, 10),
+              close: Number(c?.close)
+            }))
+            .filter(r => r.date && Number.isFinite(r.close) && r.close > 0)
+            .sort((a, b) => a.date.localeCompare(b.date))
+        : [];
+      if (parsed.length) {
+        rows = parsed;
+        break;
+      }
+    } catch (err) {
+      console.warn('fetchDailyCloseSeriesFinalPatchV2 failed:', candidate, err);
+    }
+  }
+
+  navDailyCloseCacheFinalPatch.set(cacheKey, rows);
+  return rows;
+};
+
+function hasAccurateDailyNavCacheFinalPatchV2() {
+  return Array.isArray(accurateDailyNavRowsCacheFinalPatch) && accurateDailyNavRowsCacheFinalPatch.length > 0;
+}
+
+async function refreshAccurateDailyNavRowsCacheFinalPatchV2(force = false) {
+  if (!force && accurateDailyNavRowsPromiseFinalPatch) return accurateDailyNavRowsPromiseFinalPatch;
+  accurateDailyNavRowsPromiseFinalPatch = (async () => {
+    try {
+      const rows = await buildAccurateDailyNavRowsFinalPatch();
+      accurateDailyNavRowsCacheFinalPatch = Array.isArray(rows) && rows.length ? rows : navFallbackRowsFinalPatchV2();
+      return accurateDailyNavRowsCacheFinalPatch;
+    } catch (err) {
+      console.error('refreshAccurateDailyNavRowsCacheFinalPatchV2 failed:', err);
+      accurateDailyNavRowsCacheFinalPatch = navFallbackRowsFinalPatchV2();
+      return accurateDailyNavRowsCacheFinalPatch;
+    } finally {
+      accurateDailyNavRowsPromiseFinalPatch = null;
+    }
+  })();
+  return accurateDailyNavRowsPromiseFinalPatch;
+}
+
+function buildDailyNavRowsFromAccurateCacheFinalPatchV2() {
+  return (accurateDailyNavRowsCacheFinalPatch || []).map(r => [
+    r.date,
+    r.etfNav === '' ? '' : Number(r.etfNav || 0),
+    r.stockNav === '' ? '' : Number(r.stockNav || 0),
+    r.etfDailyReturn === '' ? '' : Number((Number(r.etfDailyReturn) * 100).toFixed(4)),
+    r.stockDailyReturn === '' ? '' : Number((Number(r.stockDailyReturn) * 100).toFixed(4)),
+    r.etfCumReturn === '' ? '' : Number((Number(r.etfCumReturn) * 100).toFixed(4)),
+    r.stockCumReturn === '' ? '' : Number((Number(r.stockCumReturn) * 100).toFixed(4))
+  ]);
+}
+
+function buildCleanExportSheetsAccurateSyncFinalPatchV2() {
+  const sheets = buildCleanExportSheetsFinalPatch();
+  if (sheets?.daily_nav) {
+    sheets.daily_nav.rows = [
+      ['日期','ETF組NAV','個股組NAV','ETF組每日報酬率(%)','個股組每日報酬率(%)','ETF組累積報酬率(%)','個股組累積報酬率(%)'],
+      ...buildDailyNavRowsFromAccurateCacheFinalPatchV2()
+    ];
+  }
+  return sheets;
+}
+
+buildDailyNavRowsCleanExportPatch = function buildDailyNavRowsCleanExportPatchV2() {
+  return buildDailyNavRowsFromAccurateCacheFinalPatchV2();
+};
+
+buildCleanExportSheetsAccurateFinalPatch = async function buildCleanExportSheetsAccurateFinalPatchV2() {
+  await refreshAccurateDailyNavRowsCacheFinalPatchV2();
+  return buildCleanExportSheetsAccurateSyncFinalPatchV2();
+};
+
+renderNavChart = async function renderNavChartAccurateCachedFinalPatchV2() {
+  const renderSeq = ++navRenderSeqFinalPatch;
+  const el = qs('nav-chart');
+  if (!el) return;
+  const title = qs('nav-compare-note');
+
+  await refreshAccurateDailyNavRowsCacheFinalPatchV2(true);
+  if (renderSeq !== navRenderSeqFinalPatch) return;
+
+  const rows = hasAccurateDailyNavCacheFinalPatchV2() ? accurateDailyNavRowsCacheFinalPatch : navFallbackRowsFinalPatchV2();
+  const labels = rows.map(r => `${String(r.date).slice(5, 7)}/${String(r.date).slice(8, 10)}`);
+  const eData = rows.map(r => r.etfCumReturn === '' ? null : Number(r.etfCumReturn) * 100);
+  const sData = rows.map(r => r.stockCumReturn === '' ? null : Number(r.stockCumReturn) * 100);
+  const eLast = eData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const sLast = sData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
+  const diffNum = eLast - sLast;
+
+  if (title) {
+    title.textContent = `ETF ${eLast >= 0 ? '+' : ''}${eLast.toFixed(2)}% / 個股 ${sLast >= 0 ? '+' : ''}${sLast.toFixed(2)}% / 差距 ${diffNum >= 0 ? '+' : ''}${diffNum.toFixed(2)}%`;
+    title.style.color = Math.abs(diffNum) >= 1 ? 'var(--text1)' : 'var(--text3)';
+  }
+
+  if (typeof navChart !== 'undefined' && navChart) navChart.destroy();
+  navChart = new Chart(el, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'ETF 組',
+          data: eData,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.18)',
+          pointBackgroundColor: '#60a5fa',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        },
+        {
+          label: '個股組',
+          data: sData,
+          borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,.18)',
+          pointBackgroundColor: '#fbbf24',
+          pointRadius: labels.length > 20 ? 0 : 2,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+          fill: false,
+          tension: .25,
+          spanGaps: true
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label} ${ctx.raw >= 0 ? '+' : ''}${Number(ctx.raw).toFixed(2)}%`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: false },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        },
+        y: {
+          ticks: {
+            color: '#94a3b8',
+            callback: v => `${v >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`
+          },
+          grid: { color: 'rgba(255,255,255,.06)' }
+        }
+      }
+    }
+  });
+};
+
+function ensureExportCacheReadyFinalPatchV2() {
+  if (hasAccurateDailyNavCacheFinalPatchV2()) return true;
+  refreshAccurateDailyNavRowsCacheFinalPatchV2(true);
+  toast('NAV資料整理中，請 1 秒後再按一次匯出', 'warning');
+  return false;
+}
+
+exportSelectedCsvPatch = function exportSelectedCsvPatchV2() {
+  if (!ensureExportCacheReadyFinalPatchV2()) return;
+  try {
+    const key = qs('export-sheet-select')?.value || 'full';
+    const sheets = buildCleanExportSheetsAccurateSyncFinalPatchV2();
+    if (key === 'full') {
+      const rows = [['SimTrade 完整分析報告'], ['匯出時間', new Date().toLocaleString('zh-TW')], []];
+      Object.values(sheets).forEach(sheet => {
+        rows.push([`=== ${sheet.title} ===`], ...sheet.rows, []);
+      });
+      const csv = '\uFEFF' + rows.map(r => r.map(csvCellPatch).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('完整分析報告 CSV 已匯出', 'success');
+      return;
+    }
+    const sheet = sheets[key];
+    if (!sheet) return;
+    downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows);
+    toast('CSV 已匯出', 'success');
+  } catch (err) {
+    console.error('exportSelectedCsvPatchV2 failed:', err);
+    toast('匯出失敗，請再試一次', 'danger');
+  }
+};
+
+exportAllCsvPatch = function exportAllCsvPatchV2() {
+  if (!ensureExportCacheReadyFinalPatchV2()) return;
+  try {
+    const sheets = buildCleanExportSheetsAccurateSyncFinalPatchV2();
+    Object.values(sheets).forEach((sheet, idx) => {
+      setTimeout(() => downloadRowsCsvCleanExportPatch(sheet.filename, sheet.title, sheet.rows), idx * 250);
+    });
+    toast('所有 CSV 已開始匯出', 'success');
+  } catch (err) {
+    console.error('exportAllCsvPatchV2 failed:', err);
+    toast('匯出失敗，請再試一次', 'danger');
+  }
+};
+
+exportExcelWorkbookPatch = function exportExcelWorkbookPatchV2() {
+  if (!ensureExportCacheReadyFinalPatchV2()) return;
+  try {
+    const sheets = buildCleanExportSheetsAccurateSyncFinalPatchV2();
+    const orderedSheets = [
+      ['摘要', sheets.summary.rows],
+      ['每日NAV', sheets.daily_nav.rows],
+      ['每日風險', sheets.daily_risk.rows],
+      ['每日持股', sheets.daily_holdings.rows],
+      ['每日現金流', sheets.daily_cashflow.rows],
+      ['成交明細', sheets.trades.rows],
+      ['已實現損益', sheets.realized.rows],
+      ['所有訂單', sheets.orders.rows],
+      ['期末持股', sheets.positions.rows],
+      ['人工調整', sheets.adjustments.rows],
+      ['報價快照', sheets.quotes.rows],
+      ['交易行為', sheets.behavior.rows]
+    ];
+    const workbookXml =
+      `<?xml version="1.0"?>` +
+      `<?mso-application progid="Excel.Sheet"?>` +
+      `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"` +
+      ` xmlns:o="urn:schemas-microsoft-com:office:office"` +
+      ` xmlns:x="urn:schemas-microsoft-com:office:excel"` +
+      ` xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"` +
+      ` xmlns:html="http://www.w3.org/TR/REC-html40">` +
+      `<Styles>` +
+      `<Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/></Style>` +
+      `<Style ss:ID="Header"><Font ss:Bold="1"/></Style>` +
+      `</Styles>` +
+      orderedSheets.map(([name, rows]) => workbookSheetXmlPatch(name, rows)).join('') +
+      `</Workbook>`;
+    const blob = new Blob([workbookXml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SimTrade_完整分析報告_${new Date().toISOString().slice(0, 10)}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('Excel 活頁簿已匯出', 'success');
+  } catch (err) {
+    console.error('exportExcelWorkbookPatchV2 failed:', err);
+    toast('Excel 匯出失敗，請再試一次', 'danger');
+  }
+};
+
+exportFullReportPatch = exportSelectedCsvPatch;
+exportReport = exportSelectedCsvPatch;
+exportRiskReport = exportSelectedCsvPatch;
+
+setTimeout(() => {
+  refreshAccurateDailyNavRowsCacheFinalPatchV2(true).catch(err => {
+    console.error('initial NAV cache warmup failed:', err);
+  });
+}, 0);
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
