@@ -2598,13 +2598,14 @@ function updateAllMetrics() {
   for (const grp of ['etf', 'stock']) {
     const g = state.groups[grp];
     const dd = calcDD(grp);
+    const maxDD = Number(g.maxDD || 0);
     const lim = grp === 'etf' ? state.limits.etf : state.limits.stk;
-    const ddPct = Math.min(dd / lim * 100, 100);
+    const ddPct = Math.min(maxDD / lim * 100, 100);
     const prefix = grp === 'etf' ? 'etf' : 'stk';
-    const barCls = dd > lim * 0.8 ? 'danger' : dd > lim * 0.5 ? 'warn' : 'ok';
+    const barCls = maxDD > lim * 0.8 ? 'danger' : maxDD > lim * 0.5 ? 'warn' : 'ok';
 
-    setText(`${prefix}-dd-label`, `${dd.toFixed(1)}% / ${lim}%`);
-    setText(`${prefix}-dd-val`, dd.toFixed(2) + '%', dd > lim * 0.8 ? 'var(--red)' : dd > lim * 0.5 ? 'var(--amber)' : 'var(--text)');
+    setText(`${prefix}-dd-label`, `${maxDD.toFixed(1)}% / ${lim}%`);
+    setText(`${prefix}-dd-val`, maxDD.toFixed(2) + '%', maxDD > lim * 0.8 ? 'var(--red)' : maxDD > lim * 0.5 ? 'var(--amber)' : 'var(--text)');
     const bar = qs(`${prefix}-dd-bar`);
     if (bar) { bar.style.width = ddPct + '%'; bar.className = `risk-bar-fill ${barCls}`; }
     setText(`${prefix}-util`, calcUtil(grp) + '%', 'var(--text)');
