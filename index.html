@@ -9168,6 +9168,17 @@ function previousTradingDateKeyFinalPatch(baseDate) {
   return navLocalDateKeyFinalPatch(d);
 }
 
+function navChartEndDateKeyFinalPatch(baseDate) {
+  const d = new Date(baseDate);
+  const day = d.getDay();
+  const minutes = d.getHours() * 60 + d.getMinutes();
+  const isWeekday = day >= 1 && day <= 5;
+  if (isWeekday && minutes >= (9 * 60)) {
+    return navLocalDateKeyFinalPatch(d);
+  }
+  return previousTradingDateKeyFinalPatch(d);
+}
+
 function syncPeriodInputsFromStateFinalPatch() {
   const startEl = qs('period-start');
   const endEl = qs('period-end');
@@ -9360,7 +9371,7 @@ function getCompetitionTradingDaysFinalPatch() {
   if (!period.start) return deriveNavTimelineKeysFinalPatch().filter(d => d && d !== '1970-01-01');
   const startKey = formatLocalDateKey(period.start);
   const todayTwn = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
-  let endKey = previousTradingDateKeyFinalPatch(todayTwn);
+  let endKey = navChartEndDateKeyFinalPatch(todayTwn);
   if (period.end) {
     const configuredEnd = formatLocalDateKey(period.end);
     if (configuredEnd < endKey) endKey = configuredEnd;
@@ -9622,6 +9633,8 @@ async function buildGroupDailyNavSeriesAccurateFinalPatch(grp, dateKeys) {
 
   const startKey = dateKeys[0];
   const endKey = dateKeys[dateKeys.length - 1];
+  const nowTwn = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
+  const todayKey = navLocalDateKeyFinalPatch(nowTwn);
   const closeSeriesEntries = await Promise.all(
     [...symbolSet].map(async sym => [sym, await fetchDailyCloseSeriesFinalPatch(sym, startKey, endKey)])
   );
@@ -9691,7 +9704,12 @@ async function buildGroupDailyNavSeriesAccurateFinalPatch(grp, dateKeys) {
       if (!pos || Number(pos.qty || 0) <= 0) continue;
       const closeSeries = closeSeriesMap.get(sym) || [];
       const closePx = pickCloseOnOrBeforeFinalPatch(closeSeries, dateKey);
+      const livePx =
+        dateKey === todayKey && isValidPricePatch(state.securities?.[sym]?.price)
+          ? Number(state.securities?.[sym]?.price)
+          : null;
       const fallbackPx =
+        livePx ??
         closePx ??
         lastMarkMap.get(sym) ??
         Number(state.securities?.[sym]?.base) ??
@@ -10495,6 +10513,31 @@ function exportCellNormalizedPatch(value) {
   return value;
 }
 
+buildSummaryRowsCleanExportPatch = function buildSummaryRowsCleanExportPatchFinalRounded() {
+  return ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [
+      cleanGroupLabelForExportPatch(grp),
+      exportNumberIntPatch(m.nav || 0),
+      exportNumberIntPatch(m.cash || 0),
+      exportNumberIntPatch(m.marketValue || 0),
+      exportNumberIntPatch(m.totalCost || 0),
+      exportNumberIntPatch(m.realized || 0),
+      exportNumberIntPatch(m.unrealized || 0),
+      exportNumberIntPatch(m.totalPnl || 0),
+      exportNumberPctPatch(m.returnPct || 0, 4),
+      Number(m.tradeCount || 0),
+      exportNumberIntPatch(m.feeTotal || 0),
+      exportNumberIntPatch(m.taxTotal || 0),
+      exportNumberIntPatch(m.dividendTotal || 0),
+      exportNumberPctPatch(m.maxDD || 0, 4),
+      m.sharpe === '' || m.sharpe == null ? '' : exportNumberPctPatch(m.sharpe, 2),
+      exportNumberPctPatch(m.utilizationPct || 0, 2),
+      m.frozen || '否'
+    ];
+  });
+};
+
 buildQuoteRowsCleanExportPatch = function buildQuoteRowsCleanExportPatchFinalRounded() {
   return Object.entries(state.securities || {}).map(([sym, s]) => [
     symbolFullPatch(sym),
@@ -10505,6 +10548,201 @@ buildQuoteRowsCleanExportPatch = function buildQuoteRowsCleanExportPatchFinalRou
     s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
     isValidPricePatch(s.price) ? '有效' : '無效'
   ]);
+};
+
+buildExecutedRowsCleanExportPatch = function buildExecutedRowsCleanExportPatchFinalRounded() {
+  return (state.orders || [])
+    .filter(o => ['executed', 'filled'].includes(String(o.status || '').toLowerCase()))
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderExecutedAtPatch(a)).date || a.settlement_date || '';
+      const at = splitDateTimePatch(orderExecutedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderExecutedAtPatch(b)).date || b.settlement_date || '';
+      const bt = splitDateTimePatch(orderExecutedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        cleanGroupLabelForExportPatch(getOrderGroupPatch(o)),
+        cleanSideLabelForExportPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        Number(o.qty || 0),
+        exportNumberPricePatch(o.settlement_price ?? o.price ?? 0, 2),
+        exportNumberPricePatch(o.price ?? 0, 2),
+        exportNumberIntPatch(o.amount || 0),
+        exportNumberIntPatch(o.fee_amount || 0),
+        exportNumberIntPatch(o.tax_amount || 0),
+        exportNumberIntPatch(o.settlement_amount || 0),
+        o.comment || ''
+      ];
+    });
+};
+
+buildRealizedRowsCleanExportPatch = function buildRealizedRowsCleanExportPatchFinalRounded() {
+  const books = { etf: {}, stock: {} };
+  const rows = [];
+  const executed = (state.orders || [])
+    .filter(o => ['executed', 'filled'].includes(String(o.status || '').toLowerCase()))
+    .sort((a, b) => {
+      const at = new Date(orderSubmittedAtPatch(a) || a.created_at || 0).getTime() || 0;
+      const bt = new Date(orderSubmittedAtPatch(b) || b.created_at || 0).getTime() || 0;
+      return at - bt;
+    });
+
+  for (const order of executed) {
+    const grp = getOrderGroupPatch(order);
+    const sym = symbolFullPatch(order.symbol);
+    const qty = Number(order.qty || 0);
+    const amount = Number(order.amount || 0);
+    const fee = Number(order.fee_amount || 0);
+    const tax = Number(order.tax_amount || 0);
+    const settlement = Number(order.settlement_amount || (order.side === 'buy' ? amount + fee + tax : amount - fee - tax) || 0);
+    if (!books[grp][sym]) books[grp][sym] = { qty: 0, avgPrice: 0 };
+    const pos = books[grp][sym];
+
+    if (order.side === 'buy') {
+      const buyCost = amount + fee;
+      pos.avgPrice = pos.qty > 0 ? ((pos.avgPrice * pos.qty) + buyCost) / (pos.qty + qty) : (qty > 0 ? buyCost / qty : 0);
+      pos.qty += qty;
+      continue;
+    }
+
+    const avgCost = Number(pos.avgPrice || 0);
+    const costBasis = avgCost * qty;
+    const realized = settlement - costBasis;
+    const submitted = splitDateTimePatch(orderSubmittedAtPatch(order));
+    const executedAt = splitDateTimePatch(orderExecutedAtPatch(order));
+    rows.push([
+      cleanGroupLabelForExportPatch(grp),
+      submitted.date,
+      submitted.time,
+      executedAt.date || order.settlement_date || '',
+      executedAt.time,
+      sym,
+      order.name || '',
+      cleanSideLabelForExportPatch(order.side),
+      qty,
+      exportNumberPricePatch(avgCost, 3),
+      exportNumberPricePatch(order.settlement_price ?? order.price ?? 0, 2),
+      exportNumberIntPatch(amount),
+      exportNumberIntPatch(fee),
+      exportNumberIntPatch(tax),
+      exportNumberIntPatch(settlement),
+      exportNumberIntPatch(realized)
+    ]);
+
+    pos.qty = Math.max(0, pos.qty - qty);
+    if (pos.qty <= 0) pos.avgPrice = 0;
+  }
+
+  return rows;
+};
+
+buildAllOrderRowsCleanExportPatch = function buildAllOrderRowsCleanExportPatchFinalRounded() {
+  return (state.orders || [])
+    .sort((a, b) => {
+      const ad = splitDateTimePatch(orderSubmittedAtPatch(a)).date || '';
+      const at = splitDateTimePatch(orderSubmittedAtPatch(a)).time || '';
+      const bd = splitDateTimePatch(orderSubmittedAtPatch(b)).date || '';
+      const bt = splitDateTimePatch(orderSubmittedAtPatch(b)).time || '';
+      return `${ad} ${at}`.localeCompare(`${bd} ${bt}`);
+    })
+    .map(o => {
+      const submitted = splitDateTimePatch(orderSubmittedAtPatch(o));
+      const executedAt = splitDateTimePatch(orderExecutedAtPatch(o));
+      return [
+        submitted.date,
+        submitted.time,
+        executedAt.date || o.settlement_date || '',
+        executedAt.time,
+        cleanGroupLabelForExportPatch(getOrderGroupPatch(o)),
+        cleanStatusLabelForExportPatch(o.status),
+        cleanSideLabelForExportPatch(o.side),
+        symbolFullPatch(o.symbol),
+        o.name || '',
+        Number(o.qty || 0),
+        exportNumberPricePatch(o.price ?? 0, 2),
+        exportNumberIntPatch(o.amount || 0),
+        exportNumberIntPatch(o.fee_amount || 0),
+        exportNumberIntPatch(o.tax_amount || 0),
+        exportNumberIntPatch(o.settlement_amount || 0),
+        o.comment || ''
+      ];
+    });
+};
+
+buildCurrentPositionRowsCleanExportPatch = function buildCurrentPositionRowsCleanExportPatchFinalRounded() {
+  const rows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      rows.push([
+        cleanGroupLabelForExportPatch(grp),
+        symbolFullPatch(p.symbol),
+        state.securities?.[p.symbol]?.name || p.name || '',
+        Number(p.qty || 0),
+        exportNumberPricePatch(p.avgPrice || 0, 3),
+        exportNumberPricePatch(price || 0, 2),
+        exportNumberIntPatch(marketValue || 0),
+        exportNumberIntPatch(cost || 0),
+        exportNumberIntPatch(unrealized || 0),
+        cost ? exportNumberPctPatch((unrealized / cost) * 100, 4) : 0,
+        nav ? exportNumberPctPatch((marketValue / nav) * 100, 4) : 0
+      ]);
+    }
+  }
+  return rows;
+};
+
+buildDailyHoldingRowsCleanExportPatch = function buildDailyHoldingRowsCleanExportPatchFinalRounded() {
+  const all = [];
+  for (const grp of ['etf', 'stock']) {
+    const result = buildDailyLedgerSnapshotsFinalPatch(grp);
+    all.push(...(result.holdingRows || []).map(r => [
+      r[0],
+      r[1],
+      r[2],
+      r[3],
+      Number(r[4] || 0),
+      exportNumberPricePatch(r[5] || 0, 3),
+      exportNumberIntPatch(r[6] || 0),
+      r[7] === '' ? '' : exportNumberPctPatch(r[7], 4)
+    ]));
+  }
+  return all;
+};
+
+buildDailyCashflowRowsCleanExportPatch = function buildDailyCashflowRowsCleanExportPatchFinalRounded() {
+  const all = [];
+  for (const grp of ['etf', 'stock']) {
+    const result = buildDailyLedgerSnapshotsFinalPatch(grp);
+    all.push(...(result.cashRows || []).map(r => [
+      r[0],
+      r[1],
+      exportNumberIntPatch(r[2] || 0),
+      exportNumberIntPatch(r[3] || 0),
+      exportNumberIntPatch(r[4] || 0),
+      exportNumberIntPatch(r[5] || 0),
+      exportNumberIntPatch(r[6] || 0),
+      exportNumberIntPatch(r[7] || 0),
+      exportNumberIntPatch(r[8] || 0),
+      r[9] === '' ? '' : exportNumberIntPatch(r[9]),
+      r[10] === '' ? '' : exportNumberIntPatch(r[10]),
+      r[11] === '' ? '' : exportNumberIntPatch(r[11])
+    ]));
+  }
+  return all;
 };
 
 function buildDailyNavRowsFromAccurateCacheFinalPatchV3() {
@@ -10576,6 +10814,23 @@ workbookSheetXmlPatch = function workbookSheetXmlPatchFinalNumeric(name, rows) {
     return `<Row>${cells}</Row>`;
   }).join('');
   return `<Worksheet ss:Name="${excelXmlEscapePatch(excelSheetNamePatch(name))}"><Table>${tableRows}</Table></Worksheet>`;
+};
+
+buildCleanExportSheetsAccurateSyncFinalPatchV2 = function buildCleanExportSheetsAccurateSyncFinalPatchV3() {
+  const sheets = buildCleanExportSheetsFinalPatch();
+  if (sheets?.daily_nav) {
+    sheets.daily_nav.rows = [
+      ['日期','ETF組NAV','個股組NAV','ETF組每日報酬率(%)','個股組每日報酬率(%)','ETF組累積報酬率(%)','個股組累積報酬率(%)'],
+      ...buildDailyNavRowsFromAccurateCacheFinalPatchV3()
+    ];
+  }
+  if (sheets?.daily_risk) {
+    sheets.daily_risk.rows = [
+      ['日期','組別','NAV','每日報酬率(%)','累積報酬率(%)','當日回撤(%)','最大回撤(%)','現金','持股市值','現金比率(%)','資金曝險比率(%)','最大單一持股比重(%)'],
+      ...buildDailyRiskRowsCleanExportPatch()
+    ];
+  }
+  return sheets;
 };
 
 exportFullReportPatch = exportSelectedCsvPatch;
