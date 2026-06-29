@@ -8275,6 +8275,54 @@ function buildDailyRiskRowsCleanExportPatch() {
 }
 
 let accurateDailyNavSeriesByGroupFinalPatchV3 = { etf: [], stock: [] };
+let navChartDataHashFinalPatchV3 = '';
+
+calcDrawdownStatsPatch = function calcDrawdownStatsAccurateFinalPatch(grp) {
+  const g = state.groups?.[grp];
+  const points = [];
+
+  const accurateSeries = accurateDailyNavSeriesByGroupFinalPatchV3?.[grp] || [];
+  accurateSeries.forEach(p => {
+    const nav = Number(p?.nav);
+    if (Number.isFinite(nav) && nav > 0) points.push(nav);
+  });
+
+  if (!points.length) {
+    const navHistory = typeof normalizeNavHistoryPoints === 'function'
+      ? normalizeNavHistoryPoints(g?.navHistory || [])
+      : (g?.navHistory || []);
+    navHistory.forEach(p => {
+      const nav = Number(p?.nav);
+      if (Number.isFinite(nav) && nav > 0) points.push(nav);
+    });
+  }
+
+  const currentNav = Number(calcNAV(grp));
+  if (Number.isFinite(currentNav) && currentNav > 0) {
+    const lastPoint = points.length ? points[points.length - 1] : null;
+    if (!Number.isFinite(lastPoint) || Math.abs(lastPoint - currentNav) > 0.0001) {
+      points.push(currentNav);
+    }
+  }
+
+  let peakNAV = Number(INITIAL || 0);
+  let maxDD = 0;
+  let currentDD = 0;
+
+  for (const nav of points) {
+    if (nav > peakNAV) peakNAV = nav;
+    const dd = peakNAV > 0 ? (peakNAV - nav) / peakNAV * 100 : 0;
+    if (dd > maxDD) maxDD = dd;
+    currentDD = dd;
+  }
+
+  if (g) {
+    g.peakNAV = peakNAV;
+    g.maxDD = maxDD;
+  }
+
+  return { peakNAV, maxDD, currentDD };
+};
 
 refreshAccurateDailyNavRowsCacheFinalPatchV2 = async function refreshAccurateDailyNavRowsCacheFinalPatchV3(force = false) {
   if (!force && accurateDailyNavRowsPromiseFinalPatch) return accurateDailyNavRowsPromiseFinalPatch;
@@ -9383,7 +9431,6 @@ function hydratePeriodStateFromInputsFinalPatch() {
 }
 
 function getCompetitionTradingDaysFinalPatch() {
-  hydratePeriodStateFromInputsFinalPatch();
   if (!period.start) return deriveNavTimelineKeysFinalPatch().filter(d => d && d !== '1970-01-01');
   const startKey = formatLocalDateKey(period.start);
   const todayTwn = typeof getTWNTime === 'function' ? getTWNTime() : new Date();
@@ -9488,8 +9535,6 @@ buildDailyNavRowsCleanExportPatch = function buildDailyNavRowsCleanExportPatchCo
 };
 
 updatePeriodUI = function updatePeriodUICompetitionFinal() {
-  hydratePeriodStateFromInputsFinalPatch();
-
   const dot = qs('period-dot');
   const label = qs('period-status-label');
   const sub = qs('period-status-sub');
@@ -10332,13 +10377,26 @@ renderNavChart = async function renderNavChartAccurateCachedFinalPatchV2() {
   const eLast = eData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
   const sLast = sData.filter(v => Number.isFinite(v)).at(-1) ?? 0;
   const diffNum = eLast - sLast;
+  const dataHash = JSON.stringify([labels, eData, sData]);
 
   if (title) {
     title.textContent = `ETF ${eLast >= 0 ? '+' : ''}${eLast.toFixed(2)}% / 個股 ${sLast >= 0 ? '+' : ''}${sLast.toFixed(2)}% / 差距 ${diffNum >= 0 ? '+' : ''}${diffNum.toFixed(2)}%`;
     title.style.color = Math.abs(diffNum) >= 1 ? 'var(--text1)' : 'var(--text3)';
   }
 
-  if (typeof navChart !== 'undefined' && navChart) navChart.destroy();
+  if (typeof navChart !== 'undefined' && navChart && navChartDataHashFinalPatchV3 === dataHash) {
+    return;
+  }
+
+  if (typeof navChart !== 'undefined' && navChart) {
+    navChart.data.labels = labels;
+    if (navChart.data.datasets?.[0]) navChart.data.datasets[0].data = eData;
+    if (navChart.data.datasets?.[1]) navChart.data.datasets[1].data = sData;
+    navChart.update('none');
+    navChartDataHashFinalPatchV3 = dataHash;
+    return;
+  }
+
   navChart = new Chart(el, {
     type: 'line',
     data: {
@@ -10399,6 +10457,7 @@ renderNavChart = async function renderNavChartAccurateCachedFinalPatchV2() {
       }
     }
   });
+  navChartDataHashFinalPatchV3 = dataHash;
 };
 
 function ensureExportCacheReadyFinalPatchV2() {
