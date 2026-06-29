@@ -2554,13 +2554,39 @@ function calcNAV(grp) {
   return calcMarkedNav(grp);
 }
 
-function calcDD(grp) {
+function calcDrawdownStatsPatch(grp) {
   const g = state.groups[grp];
-  const nav = calcNAV(grp);
-  if (nav > g.peakNAV) g.peakNAV = nav;
-  const dd = g.peakNAV > 0 ? (g.peakNAV - nav) / g.peakNAV * 100 : 0;
-  if (dd > g.maxDD) g.maxDD = dd;
-  return dd;
+  const navHistory = typeof normalizeNavHistoryPoints === 'function'
+    ? normalizeNavHistoryPoints(g?.navHistory || [])
+    : (g?.navHistory || []);
+  const points = navHistory
+    .map(p => Number(p?.nav))
+    .filter(nav => Number.isFinite(nav) && nav > 0);
+
+  const currentNav = Number(calcNAV(grp));
+  if (Number.isFinite(currentNav) && currentNav > 0) points.push(currentNav);
+
+  let peakNAV = Number(INITIAL || 0);
+  let maxDD = 0;
+  let currentDD = 0;
+
+  for (const nav of points) {
+    if (nav > peakNAV) peakNAV = nav;
+    const dd = peakNAV > 0 ? (peakNAV - nav) / peakNAV * 100 : 0;
+    if (dd > maxDD) maxDD = dd;
+    currentDD = dd;
+  }
+
+  if (g) {
+    g.peakNAV = peakNAV;
+    g.maxDD = maxDD;
+  }
+
+  return { peakNAV, maxDD, currentDD };
+}
+
+function calcDD(grp) {
+  return calcDrawdownStatsPatch(grp).currentDD;
 }
 
 function calcSharpe(grp) {
@@ -5348,7 +5374,7 @@ function groupMetricsPatch(grp) {
     feeTotal,
     taxTotal,
     dividendTotal,
-    maxDD: Number(g.maxDD || 0),
+    maxDD: calcDrawdownStatsPatch(grp).maxDD,
     sharpe: typeof calcSharpe === 'function' ? calcSharpe(grp) : '',
     utilizationPct: typeof calcUtil === 'function' ? calcUtil(grp) : (nav ? marketValue / nav * 100 : 0),
     frozen: g.frozen ? '是' : '否'
