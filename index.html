@@ -8907,6 +8907,36 @@ if (typeof updateAllMetrics === 'function') {
   const previousUpdateAllMetricsWorkbookPatch = updateAllMetrics;
   updateAllMetrics = function updateAllMetricsWorkbookPatched() {
     previousUpdateAllMetricsWorkbookPatch();
+    try {
+      const riskRows = typeof buildDailyRiskRowsCleanExportPatch === 'function'
+        ? buildDailyRiskRowsCleanExportPatch()
+        : [];
+      for (const grp of ['etf', 'stock']) {
+        const prefix = grp === 'etf' ? 'etf' : 'stk';
+        const groupLabel = cleanGroupLabelForExportPatch(grp);
+        const rows = riskRows.filter(r => r[1] === groupLabel);
+        const latest = rows.length ? rows[rows.length - 1] : null;
+        if (!latest) continue;
+        const maxDD = Math.abs(Number(latest[6] || 0));
+        const lim = grp === 'etf' ? Number(state.limits?.etf || 0) : Number(state.limits?.stk || 0);
+        const ddPct = lim > 0 ? Math.min(maxDD / lim * 100, 100) : 0;
+        const barCls = lim > 0
+          ? (maxDD > lim * 0.8 ? 'danger' : maxDD > lim * 0.5 ? 'warn' : 'ok')
+          : 'ok';
+
+        setText(`${prefix}-dd-label`, lim > 0 ? `${maxDD.toFixed(1)}% / ${lim}%` : `${maxDD.toFixed(1)}% / 無上限`);
+        setText(`${prefix}-dd-val`, maxDD.toFixed(2) + '%', lim > 0
+          ? (maxDD > lim * 0.8 ? 'var(--red)' : maxDD > lim * 0.5 ? 'var(--amber)' : 'var(--text)')
+          : 'var(--text)');
+        const bar = qs(`${prefix}-dd-bar`);
+        if (bar) {
+          bar.style.width = ddPct + '%';
+          bar.className = `risk-bar-fill ${barCls}`;
+        }
+      }
+    } catch (err) {
+      console.error('updateAllMetricsWorkbookPatched dd sync failed:', err);
+    }
     ensureCsvExportUI();
   };
 }
