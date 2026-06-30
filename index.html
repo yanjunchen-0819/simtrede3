@@ -10912,6 +10912,22 @@ exportFullReportPatch = exportSelectedCsvPatch;
 exportReport = exportSelectedCsvPatch;
 exportRiskReport = exportSelectedCsvPatch;
 
+const previousTriggerPriceUpdateDrawdownFinalPatch = triggerPriceUpdate;
+triggerPriceUpdate = async function triggerPriceUpdateDrawdownFinalPatched(forceDebug = false) {
+  const result = await previousTriggerPriceUpdateDrawdownFinalPatch(forceDebug);
+  try {
+    await refreshAccurateDailyNavRowsCacheFinalPatchV2(true);
+  } catch (err) {
+    console.error('triggerPriceUpdateDrawdownFinalPatched cache refresh failed:', err);
+  }
+  try {
+    updateAllMetrics();
+  } catch (err) {
+    console.error('triggerPriceUpdateDrawdownFinalPatched metrics refresh failed:', err);
+  }
+  return result;
+};
+
 setTimeout(() => {
   refreshAccurateDailyNavRowsCacheFinalPatchV2(true).catch(err => {
     console.error('initial NAV cache warmup failed:', err);
