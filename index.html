@@ -10958,6 +10958,36 @@ triggerPriceUpdate = async function triggerPriceUpdateDrawdownFinalPatched(force
   return result;
 };
 
+if (typeof updateAllMetrics === 'function') {
+  const previousUpdateAllMetricsNoLimitFinalPatch = updateAllMetrics;
+  updateAllMetrics = function updateAllMetricsNoLimitFinalPatched() {
+    previousUpdateAllMetricsNoLimitFinalPatch();
+    try {
+      const riskRows = typeof buildDailyRiskRowsCleanExportPatch === 'function'
+        ? buildDailyRiskRowsCleanExportPatch()
+        : [];
+      for (const grp of ['etf', 'stock']) {
+        const prefix = grp === 'etf' ? 'etf' : 'stk';
+        const groupLabel = cleanGroupLabelForExportPatch(grp);
+        const rows = riskRows.filter(r => r[1] === groupLabel);
+        const latest = rows.length ? rows[rows.length - 1] : null;
+        if (!latest) continue;
+        const maxDD = Math.abs(Number(latest[6] || 0));
+        const bar = qs(`${prefix}-dd-bar`);
+
+        setText(`${prefix}-dd-label`, `${maxDD.toFixed(1)}% / 無上限`);
+        setText(`${prefix}-dd-val`, maxDD.toFixed(2) + '%', 'var(--text)');
+        if (bar) {
+          bar.style.width = Math.min(Math.max(maxDD, 0), 100) + '%';
+          bar.className = 'risk-bar-fill ok';
+        }
+      }
+    } catch (err) {
+      console.error('updateAllMetricsNoLimitFinalPatched failed:', err);
+    }
+  };
+}
+
 setTimeout(() => {
   refreshAccurateDailyNavRowsCacheFinalPatchV2(true).catch(err => {
     console.error('initial NAV cache warmup failed:', err);
